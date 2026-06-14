@@ -998,8 +998,16 @@ void loop()
                     case DunkerUiCmd::SwitchOn:        dunkerDev->cmdSwitchOn();        break;
                     case DunkerUiCmd::EnableOperation: dunkerDev->cmdEnableOperation(); break;
                     case DunkerUiCmd::DisableVoltage:  dunkerDev->cmdDisableVoltage();  break;
+                    case DunkerUiCmd::Halt:            dunkerDev->halt();               break;
                 }
             };
+            // M5: motion
+            dcbs.onSetMode = [](int8_t mode){ if (dunkerDev) dunkerDev->setMode(mode); };
+            dcbs.onGoto    = [](int32_t pos, uint32_t vel){ if (dunkerDev) dunkerDev->gotoPosition(pos, vel); };
+            dcbs.onJog     = [](int dir, uint32_t speed){ if (dunkerDev) dunkerDev->jog(dir, speed); };
+            // M6: I/O + brake
+            dcbs.onSetOutput = [](uint8_t bit, bool on){ if (dunkerDev) dunkerDev->setOutputBit(bit, on); };
+            dcbs.onBrake     = [](bool release){ if (dunkerDev) dunkerDev->setBrake(release); };
             dunkerUi.setCallbacks(dcbs);
             dunkerUi.create(selectedNodeId);
             dunkerUi.load();
