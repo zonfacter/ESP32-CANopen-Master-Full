@@ -20,6 +20,17 @@ struct NodeDetail_Info {
     const char* stateText = "---";
     uint32_t lastSeenMs = 0;
     const char* typeText = "Unknown";
+
+    // Identity (1018h) - filled from discovery / identify-all / READ INFO
+    bool     identityKnown = false;
+    uint32_t vendorId = 0;
+    uint32_t productCode = 0;
+    uint32_t revision = 0;
+    uint32_t serial = 0;
+
+    // Error register (1001h, UNSIGNED8 bitfield per DS301)
+    bool    errRegValid = false;
+    uint8_t errReg = 0;
 };
 
 struct NodeDetail_Callbacks {
@@ -30,6 +41,9 @@ struct NodeDetail_Callbacks {
     std::function<void(uint8_t nodeId)> onNmtStop = nullptr;
     std::function<void(uint8_t nodeId)> onNmtResetNode = nullptr;
     std::function<void(uint8_t nodeId)> onNmtResetComm = nullptr;
+
+    // Read standard objects 1018h (identity) + 1001h (error register) via SDO
+    std::function<void(uint8_t nodeId)> onReadInfo = nullptr;
 
     // Config (AP04): set Node-ID via SDO + ResetComm
     std::function<void(uint8_t nodeId, uint8_t newNodeId)> onSetNodeId = nullptr;
@@ -72,9 +86,9 @@ public:
         lv_obj_set_style_text_color(backLbl, lv_color_hex(0xFFFFFF), 0);
         lv_obj_center(backLbl);
 
-        // Info card
+        // Info card (left column = NMT state, right column = identity + error reg)
         lv_obj_t* card = lv_obj_create(m_screen);
-        lv_obj_set_size(card, 780, 110);
+        lv_obj_set_size(card, 620, 120);
         lv_obj_set_pos(card, 10, 80);
         lv_obj_set_style_bg_color(card, lv_color_hex(0x12122A), 0);
         lv_obj_set_style_border_color(card, lv_color_hex(0x0F3460), 0);
@@ -82,11 +96,12 @@ public:
         lv_obj_set_style_radius(card, 12, 0);
         lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
+        // Left column
         m_lblNode = lv_label_create(card);
         lv_label_set_text(m_lblNode, "Node: ---");
         lv_obj_set_style_text_color(m_lblNode, lv_color_hex(0xFFFFFF), 0);
         lv_obj_set_style_text_font(m_lblNode, &lv_font_montserrat_18, 0);
-        lv_obj_set_pos(m_lblNode, 12, 12);
+        lv_obj_set_pos(m_lblNode, 12, 10);
 
         m_lblState = lv_label_create(card);
         lv_label_set_text(m_lblState, "State: ---");
@@ -98,7 +113,37 @@ public:
         lv_label_set_text(m_lblLast, "Last seen: ---");
         lv_obj_set_style_text_color(m_lblLast, lv_color_hex(0xAAAAAA), 0);
         lv_obj_set_style_text_font(m_lblLast, &lv_font_montserrat_14, 0);
-        lv_obj_set_pos(m_lblLast, 12, 72);
+        lv_obj_set_pos(m_lblLast, 12, 80);
+
+        // Right column: identity (1018h)
+        m_lblVendor = lv_label_create(card);
+        lv_label_set_text(m_lblVendor, "Vendor: ---");
+        lv_obj_set_style_text_color(m_lblVendor, lv_color_hex(0xCCCCCC), 0);
+        lv_obj_set_style_text_font(m_lblVendor, &lv_font_montserrat_14, 0);
+        lv_obj_set_pos(m_lblVendor, 320, 8);
+
+        m_lblProduct = lv_label_create(card);
+        lv_label_set_text(m_lblProduct, "Product: ---");
+        lv_obj_set_style_text_color(m_lblProduct, lv_color_hex(0xCCCCCC), 0);
+        lv_obj_set_style_text_font(m_lblProduct, &lv_font_montserrat_14, 0);
+        lv_obj_set_pos(m_lblProduct, 320, 36);
+
+        m_lblRevSer = lv_label_create(card);
+        lv_label_set_text(m_lblRevSer, "Rev/Ser: ---");
+        lv_obj_set_style_text_color(m_lblRevSer, lv_color_hex(0xCCCCCC), 0);
+        lv_obj_set_style_text_font(m_lblRevSer, &lv_font_montserrat_14, 0);
+        lv_obj_set_pos(m_lblRevSer, 320, 64);
+
+        // Right column: error register (1001h)
+        m_lblErr = lv_label_create(card);
+        lv_label_set_text(m_lblErr, "Err 1001h: ---");
+        lv_obj_set_style_text_color(m_lblErr, lv_color_hex(0xFF6666), 0);
+        lv_obj_set_style_text_font(m_lblErr, &lv_font_montserrat_14, 0);
+        lv_obj_set_pos(m_lblErr, 320, 92);
+
+        // READ INFO button (reads 1018h identity + 1001h error register via SDO)
+        m_btnReadInfo = makeBtn("READ\nINFO", lv_color_hex(0x4A2C82), 640, 80, 150, 120,
+                                NodeDetailUI::onReadInfoClicked);
 
         // NMT buttons
         int x = 10;
@@ -160,6 +205,46 @@ public:
             else snprintf(b, sizeof(b), "Last seen: %lu ms", (unsigned long)info.lastSeenMs);
             lv_label_set_text(m_lblLast, b);
         }
+
+        // Identity (1018h)
+        if (m_lblVendor) {
+            char b[48];
+            if (info.identityKnown) snprintf(b, sizeof(b), "Vendor: 0x%08lX", (unsigned long)info.vendorId);
+            else snprintf(b, sizeof(b), "Vendor: ---");
+            lv_label_set_text(m_lblVendor, b);
+        }
+        if (m_lblProduct) {
+            char b[64];
+            if (info.identityKnown) {
+                char ascii[8];
+                productAscii(info.productCode, ascii, sizeof(ascii));
+                if (ascii[0]) snprintf(b, sizeof(b), "Product: 0x%08lX (%s)", (unsigned long)info.productCode, ascii);
+                else          snprintf(b, sizeof(b), "Product: 0x%08lX", (unsigned long)info.productCode);
+            } else {
+                snprintf(b, sizeof(b), "Product: ---");
+            }
+            lv_label_set_text(m_lblProduct, b);
+        }
+        if (m_lblRevSer) {
+            char b[64];
+            if (info.identityKnown) snprintf(b, sizeof(b), "Rev: 0x%08lX Ser: 0x%08lX",
+                                             (unsigned long)info.revision, (unsigned long)info.serial);
+            else snprintf(b, sizeof(b), "Rev/Ser: ---");
+            lv_label_set_text(m_lblRevSer, b);
+        }
+
+        // Error register (1001h)
+        if (m_lblErr) {
+            char b[64];
+            if (info.errRegValid) {
+                char dec[40];
+                errRegDecode(info.errReg, dec, sizeof(dec));
+                snprintf(b, sizeof(b), "Err 1001h: 0x%02X [%s]", (unsigned)info.errReg, dec);
+            } else {
+                snprintf(b, sizeof(b), "Err 1001h: ---");
+            }
+            lv_label_set_text(m_lblErr, b);
+        }
     }
 
 private:
@@ -194,6 +279,44 @@ private:
         s_inst->m_cbs.onSetNodeId(s_inst->m_info.nodeId, (uint8_t)v);
     }
 
+    static void onReadInfoClicked(lv_event_t*) {
+        if (s_inst && s_inst->m_cbs.onReadInfo) s_inst->m_cbs.onReadInfo(s_inst->m_info.nodeId);
+    }
+
+    // Render the product-code as ASCII if its bytes are printable (e.g. AP04 = "CAN").
+    static void productAscii(uint32_t pc, char* out, size_t n) {
+        if (!out || n == 0) return;
+        out[0] = 0;
+        char tmp[5];
+        int k = 0;
+        for (int i = 0; i < 4; i++) {
+            char c = (char)((pc >> (8 * i)) & 0xFF);
+            if (c == 0) break;                 // string terminator
+            if (c < 32 || c > 126) { k = 0; break; } // non-printable -> not ASCII
+            tmp[k++] = c;
+        }
+        if (k >= 2) { tmp[k] = 0; snprintf(out, n, "%s", tmp); }
+    }
+
+    // Decode the DS301 error-register (1001h) bitfield into a compact string.
+    static void errRegDecode(uint8_t e, char* out, size_t n) {
+        if (!out || n == 0) return;
+        if (e == 0) { snprintf(out, n, "OK"); return; }
+        out[0] = 0;
+        size_t len = 0;
+        auto add = [&](const char* s) {
+            if (len >= n) return;
+            len += snprintf(out + len, n - len, "%s%s", len ? "|" : "", s);
+        };
+        if (e & 0x01) add("GEN");   // generic error
+        if (e & 0x02) add("CUR");   // current
+        if (e & 0x04) add("VOLT");  // voltage
+        if (e & 0x08) add("TEMP");  // temperature
+        if (e & 0x10) add("COMM");  // communication
+        if (e & 0x20) add("PROF");  // device profile specific
+        if (e & 0x80) add("MFR");   // manufacturer specific
+    }
+
     lv_obj_t* makeBtn(const char* text, lv_color_t bg, int x, int y, int w, int h,
                       lv_event_cb_t cb) {
         lv_obj_t* b = lv_btn_create(m_screen);
@@ -217,6 +340,13 @@ private:
     lv_obj_t* m_lblNode = nullptr;
     lv_obj_t* m_lblState = nullptr;
     lv_obj_t* m_lblLast = nullptr;
+
+    // Identity + error-register widgets
+    lv_obj_t* m_lblVendor = nullptr;
+    lv_obj_t* m_lblProduct = nullptr;
+    lv_obj_t* m_lblRevSer = nullptr;
+    lv_obj_t* m_lblErr = nullptr;
+    lv_obj_t* m_btnReadInfo = nullptr;
 
     lv_obj_t* m_btnStart = nullptr;
     lv_obj_t* m_btnPreOp = nullptr;

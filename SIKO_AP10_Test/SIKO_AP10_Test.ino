@@ -21,7 +21,7 @@ using namespace esp_panel::board;
 #include "lvgl_v8_port.h"
 
 // UI
-#include "start_menu_ui_new.h" // <- copy this content into src/ui/start_menu_ui.h in your project
+#include "src/ui/start_menu_ui.h"
 #include "src/ui/node_detail_ui.h"
 #include "src/ui/siko_ap_ui.h"
 
@@ -34,6 +34,10 @@ using namespace esp_panel::board;
 
 // AP04 device binding
 #include "src/devices/siko_ap04.h"
+
+// Dunker DS402 drive + UI (Milestone 4)
+#include "src/devices/dunker_drive.h"
+#include "src/ui/dunker_ui.h"
 
 // ============================================================================
 // Konfiguration
@@ -82,15 +86,11 @@ static CanopenMasterController master(&canDriver);
 
 static uint8_t selectedNodeId = 0;
 
-// Dunker drive node-id (confirmed)
-static constexpr uint8_t DUNKER_NODE_ID = 1;
-
-// Simple SDO client for DS402 quick actions (non-blocking)
-static SdoClient dunkerSdo(&canDriver, DUNKER_NODE_ID);
-
-// Forward the DS402 buttons to a specific baud if requested (prevents scanning changing it)
-static bool dunkerForceBaud = false;  // optional: force a specific baud for Dunker actions
-static uint32_t dunkerBaud = 125000;
+// Dunker DS402 page (node-independent; bound to the selected node on connect)
+static DunkerUI    dunkerUi;
+static DunkerDrive* dunkerDev = nullptr;
+static bool        dunkerPageLoaded = false;
+static bool        dunkerUiIsActive = false;
 
 // SDO ping scan (1..32) on the currently selected baud (no baud switching)
 static bool pingScanRunning = false;
@@ -100,17 +100,21 @@ static bool pingScanFound[33] = {false};
 static uint8_t pingScanFoundCount = 0;
 static uint32_t pingScanBaudSnapshot = 0;
 
-// Identify (uses the first found node from the last ping scan)
-static uint8_t identifyNodeId = 0;
-static bool identifyRunning = false;
-static uint8_t identifyStep = 0;
-static uint32_t identifyNextMs = 0;
+// Identify-All: iterate over ALL nodes found by the last ping scan and read 1018h
+static bool identifyAllRunning = false;
+static uint8_t identifyAllNode = 0;   // node currently being identified (1..32)
+static uint8_t identifyAllStep = 0;   // 0..3 = read sub 01..04, then finalize
+static uint32_t identifyAllNextMs = 0;
 static SdoClient identifySdo(&canDriver, 1);
-static uint32_t identVendor=0, identProduct=0, identRevision=0, identSerial=0;
 
-static bool dunkerOpInProgress = false;
-static uint32_t dunkerOpNextMs = 0;
-static uint8_t dunkerOpStep = 0;
+// Standard node-detail page: on-demand read of 1018h (identity) + 1001h (error register)
+static SdoClient stdSdo(&canDriver, 1);
+static bool stdReadRunning = false;
+static uint8_t stdReadNode = 0;
+static uint8_t stdReadStep = 0;
+static uint32_t stdReadNextMs = 0;
+static uint8_t stdErrReg = 0;
+static bool stdErrRegValid = false;
 
 // AP04 page/device state
 static SikoAP04* ap04Dev = nullptr;
@@ -142,11 +146,16 @@ static void onCanFrame(uint32_t cobId, const uint8_t* data, uint8_t length)
     // Feed sniffer (task context, OK). ext/rtr not available in this callback -> false/false.
     sniffer.processFrame(cobId, length, data, false, false);
 
-    // SDO client for Dunker quick actions
-    dunkerSdo.processFrame(cobId, data, length);
+    // Dunker DS402 drive (only while its page is active)
+    if (dunkerUiIsActive && dunkerDev) {
+        dunkerDev->processFrame(cobId, data, length);
+    }
 
     // Identify SDO client
     identifySdo.processFrame(cobId, data, length);
+
+    // Standard node-detail SDO client (1018h/1001h on-demand reads)
+    stdSdo.processFrame(cobId, data, length);
 
     // Ping scan detect: any SDO response in 0x581..0x5A0 marks node found
     if (pingScanRunning && cobId >= 0x581 && cobId <= 0x5A0) {
@@ -154,6 +163,10 @@ static void onCanFrame(uint32_t cobId, const uint8_t* data, uint8_t length)
         if (nid >= 1 && nid <= 32 && !pingScanFound[nid]) {
             pingScanFound[nid] = true;
             pingScanFoundCount++;
+            // Make ping-discovered nodes appear in the start-menu list
+            auto& dn = master.node(nid);
+            dn.seen = true;
+            dn.lastSeenMs = millis();
             Serial.printf("[PING] Node %u responded (COB-ID=0x%03lX)\n", (unsigned)nid, (unsigned long)cobId);
         }
     }
@@ -250,6 +263,17 @@ static NodeDetail_Info makeNodeInfo(uint8_t nid)
 
     const uint32_t now = millis();
     info.lastSeenMs = (dn.seen && dn.lastSeenMs > 0) ? (now - dn.lastSeenMs) : 0;
+
+    // Identity (from discovery / identify-all / on-demand READ INFO)
+    info.identityKnown = dn.sdoOk;
+    info.vendorId      = dn.vendorId;
+    info.productCode   = dn.productCode;
+    info.revision      = dn.revision;
+    info.serial        = dn.serial;
+
+    // Error register (1001h) is valid only for the node we last read
+    info.errRegValid = (stdErrRegValid && stdReadNode == nid);
+    info.errReg      = stdErrReg;
     return info;
 }
 
@@ -444,7 +468,7 @@ void setup()
         pingScanNode = 1;
         pingScanLastSendMs = 0;
         pingScanFoundCount = 0;
-        identifyNodeId = 0;
+        identifyAllRunning = false;
         memset(pingScanFound, 0, sizeof(pingScanFound));
         pingScanBaudSnapshot = activeBaud;
         Serial.printf("[PING] Start SDO ping scan 1..32 @ %lu bps\n", (unsigned long)pingScanBaudSnapshot);
@@ -458,14 +482,14 @@ void setup()
         }
     };
 
-    // Identify the first node found by the last ping scan
-    cbs.onIdentifyFirstFound = [](){
-        if (identifyRunning) {
+    // Identify ALL nodes found by the last ping scan (read 1018h vendor/product/rev/serial)
+    cbs.onIdentifyAll = [](){
+        if (identifyAllRunning) {
             Serial.println("[IDENT] Busy");
             return;
         }
-        if (identifyNodeId == 0) {
-            Serial.println("[IDENT] No node selected (run PING SCAN first)");
+        if (pingScanFoundCount == 0) {
+            Serial.println("[IDENT] No nodes found (run PING SCAN first)");
             return;
         }
         if (activeBaud != pingScanBaudSnapshot) {
@@ -473,15 +497,18 @@ void setup()
             return;
         }
 
-        Serial.printf("[IDENT] Start identify for node %u\n", (unsigned)identifyNodeId);
-        identifySdo = SdoClient(&canDriver, identifyNodeId);
-        identifySdo.setNodeId(identifyNodeId);
-        identifySdo.setTimeout(400);
+        // Start at the first found node
+        identifyAllNode = 0;
+        for (uint8_t i = 1; i <= 32; i++) {
+            if (pingScanFound[i]) { identifyAllNode = i; break; }
+        }
+        if (identifyAllNode == 0) return;
 
-        identVendor = identProduct = identRevision = identSerial = 0;
-        identifyRunning = true;
-        identifyStep = 0;
-        identifyNextMs = millis();
+        identifySdo.setTimeout(400);
+        identifyAllRunning = true;
+        identifyAllStep = 0;
+        identifyAllNextMs = millis();
+        Serial.printf("[IDENT-ALL] Start identify for %u node(s)\n", (unsigned)pingScanFoundCount);
     };
 
     // Loopback toggle (NO_ACK) - centralized re-init
@@ -549,6 +576,21 @@ void setup()
     ncbs.onNmtResetNode = [](uint8_t){ Serial.println("[UI] NMT RESET NODE"); master.nmtResetNode(); };
     ncbs.onNmtResetComm = [](uint8_t){ Serial.println("[UI] NMT RESET COMM"); master.nmtResetComm(); };
 
+    // Read identity (1018h) + error register (1001h) on demand for the open node
+    ncbs.onReadInfo = [](uint8_t nodeId){
+        if (stdReadRunning) { Serial.println("[STD] Busy"); return; }
+        if (nodeId < 1 || nodeId > 127) return;
+        if (stdSdo.isBusy()) { Serial.println("[STD] SDO busy"); return; }
+        stdReadNode = nodeId;
+        stdSdo.setNodeId(nodeId);
+        stdSdo.setTimeout(400);
+        stdErrRegValid = false;
+        stdReadRunning = true;
+        stdReadStep = 0;
+        stdReadNextMs = millis();
+        Serial.printf("[STD] Read 1018h+1001h for node %u\n", (unsigned)nodeId);
+    };
+
     ncbs.onSetNodeId = [](uint8_t nodeId, uint8_t newNodeId){
         Serial.printf("[UI] SET NODE-ID node=%u -> %u\n", (unsigned)nodeId, (unsigned)newNodeId);
         if (master.mode() == MasterMode::Idle || master.mode() == MasterMode::Scanning) {
@@ -605,9 +647,6 @@ void loop()
         master.setBaudrate(canReinitBaud);
         activeBaud = canReinitBaud;
 
-        // IMPORTANT: keep the SDO client bound to the current driver instance
-        dunkerSdo = SdoClient(&canDriver, DUNKER_NODE_ID);
-
         canReinitInProgress = false;
     }
 
@@ -618,6 +657,10 @@ void loop()
         ap04UiIsActive = false;
         ap04PageLoaded = false;
         ap04Dev = nullptr;
+
+        // Dunker page teardown (object is reused via rebind(), so keep the pointer)
+        dunkerUiIsActive = false;
+        dunkerPageLoaded = false;
 
         master.disconnect();
         navPendingDisconnect = false;
@@ -667,137 +710,175 @@ void loop()
                 if ((int32_t)(t - doneDue) >= 0) {
                     Serial.printf("[PING] Done. Found %u nodes: ", (unsigned)pingScanFoundCount);
                     for (uint8_t i = 1; i <= 32; i++) {
-                        if (pingScanFound[i]) {
-                            Serial.printf("%u ", (unsigned)i);
-                            if (identifyNodeId == 0) identifyNodeId = i; // first found
-                        }
+                        if (pingScanFound[i]) Serial.printf("%u ", (unsigned)i);
                     }
                     Serial.println();
-                    if (identifyNodeId) Serial.printf("[PING] First found node: %u\n", (unsigned)identifyNodeId);
                     pingScanRunning = false;
                     doneDue = 0;
+
+                    // Show freshly discovered nodes in the start-menu list
+                    lvgl_port_lock(-1);
+                    refreshStartMenuList();
+                    lvgl_port_unlock();
                 }
             }
         }
     }
 
-    // Dunker SDO client tick
-    dunkerSdo.update();
+    // Dunker DS402 drive tick (statusword poll + controlword writes)
+    if (dunkerUiIsActive && dunkerDev) {
+        dunkerDev->update();
+    }
 
     // Identify SDO client tick
     identifySdo.update();
 
-    // Identify sequencer (non-blocking): read 0x1018:01..04
-    if (identifyRunning && !identifySdo.isBusy() && (int32_t)(millis() - identifyNextMs) >= 0) {
-        switch (identifyStep) {
+    // Identify-All sequencer (non-blocking): for each found node read 1018h:01..04
+    if (identifyAllRunning && !identifySdo.isBusy() && (int32_t)(millis() - identifyAllNextMs) >= 0) {
+        identifySdo.setNodeId(identifyAllNode);
+
+        switch (identifyAllStep) {
             case 0:
-                identifyStep = 1;
-                Serial.println("[IDENT] Read 0x1018:01 Vendor ID");
+                identifyAllStep = 1;
+                master.node(identifyAllNode).identifyInProgress = true;
+                Serial.printf("[IDENT-ALL] Node %u: read 1018h:01 Vendor ID\n", (unsigned)identifyAllNode);
                 identifySdo.readAsync(0x1018, 0x01, [](SdoResult r, uint32_t v){
-                    Serial.printf("[IDENT] Vendor: res=%u val=0x%08lX (%lu)\n", (unsigned)r, (unsigned long)v, (unsigned long)v);
-                    if (r == SDO_OK) identVendor = v;
+                    if (r == SDO_OK) master.node(identifyAllNode).vendorId = v;
                 });
-                identifyNextMs = millis() + 20;
+                identifyAllNextMs = millis() + 20;
                 break;
             case 1:
-                identifyStep = 2;
-                Serial.println("[IDENT] Read 0x1018:02 Product Code");
+                identifyAllStep = 2;
+                Serial.printf("[IDENT-ALL] Node %u: read 1018h:02 Product Code\n", (unsigned)identifyAllNode);
                 identifySdo.readAsync(0x1018, 0x02, [](SdoResult r, uint32_t v){
-                    Serial.printf("[IDENT] Product: res=%u val=0x%08lX (%lu)\n", (unsigned)r, (unsigned long)v, (unsigned long)v);
-                    if (r == SDO_OK) identProduct = v;
+                    if (r == SDO_OK) master.node(identifyAllNode).productCode = v;
                 });
-                identifyNextMs = millis() + 20;
+                identifyAllNextMs = millis() + 20;
                 break;
             case 2:
-                identifyStep = 3;
-                Serial.println("[IDENT] Read 0x1018:03 Revision");
+                identifyAllStep = 3;
+                Serial.printf("[IDENT-ALL] Node %u: read 1018h:03 Revision\n", (unsigned)identifyAllNode);
                 identifySdo.readAsync(0x1018, 0x03, [](SdoResult r, uint32_t v){
-                    Serial.printf("[IDENT] Revision: res=%u val=0x%08lX (%lu)\n", (unsigned)r, (unsigned long)v, (unsigned long)v);
-                    if (r == SDO_OK) identRevision = v;
+                    if (r == SDO_OK) master.node(identifyAllNode).revision = v;
                 });
-                identifyNextMs = millis() + 20;
+                identifyAllNextMs = millis() + 20;
                 break;
             case 3:
-                identifyStep = 4;
-                Serial.println("[IDENT] Read 0x1018:04 Serial");
+                identifyAllStep = 4;
+                Serial.printf("[IDENT-ALL] Node %u: read 1018h:04 Serial\n", (unsigned)identifyAllNode);
                 identifySdo.readAsync(0x1018, 0x04, [](SdoResult r, uint32_t v){
-                    Serial.printf("[IDENT] Serial: res=%u val=0x%08lX (%lu)\n", (unsigned)r, (unsigned long)v, (unsigned long)v);
-                    if (r == SDO_OK) identSerial = v;
+                    if (r == SDO_OK) master.node(identifyAllNode).serial = v;
                 });
-                identifyNextMs = millis() + 20;
+                identifyAllNextMs = millis() + 20;
                 break;
-            default:
-                Serial.printf("[IDENT] Done node %u: vendor=%lu product=%lu rev=%lu serial=%lu\n",
-                              (unsigned)identifyNodeId,
-                              (unsigned long)identVendor,
-                              (unsigned long)identProduct,
-                              (unsigned long)identRevision,
-                              (unsigned long)identSerial);
-                identifyRunning = false;
+            default: {
+                // Finalize this node: classify + log
+                auto& dn = master.node(identifyAllNode);
+                dn.sdoOk = (dn.vendorId != 0 || dn.productCode != 0);
+                dn.known = classifyByIdentity(dn.vendorId, dn.productCode);
+                dn.identifyInProgress = false;
+
+                const char* typeStr =
+                    (dn.known == KnownDeviceType::SIKO_AP04)   ? "SIKO AP04"   :
+                    (dn.known == KnownDeviceType::SIKO_AP10)   ? "SIKO AP10"   :
+                    (dn.known == KnownDeviceType::Dunker_75CI) ? "Dunker 75CI" : "Unknown";
+
+                Serial.printf("[IDENT-ALL] Node %u: vendor=0x%08lX product=0x%08lX rev=0x%08lX serial=0x%08lX -> %s\n",
+                              (unsigned)identifyAllNode,
+                              (unsigned long)dn.vendorId,
+                              (unsigned long)dn.productCode,
+                              (unsigned long)dn.revision,
+                              (unsigned long)dn.serial,
+                              typeStr);
+
+                // Dunker: print a HEURISTIC (unverified) BG-series decode next to the
+                // raw product code, so the scheme can be validated on real hardware.
+                if (dn.known == KnownDeviceType::Dunker_75CI) {
+                    char hint[40];
+                    dunkerDecodeHint(dn.productCode, hint, sizeof(hint));
+                    Serial.printf("[IDENT-ALL] Node %u: Dunker BG-code hint (UNVERIFIED) = %s\n",
+                                  (unsigned)identifyAllNode, hint);
+                }
+
+                // Reflect the new classification in the list immediately
+                lvgl_port_lock(-1);
+                refreshStartMenuList();
+                lvgl_port_unlock();
+
+                // Advance to the next found node, or finish
+                uint8_t next = 0;
+                for (uint8_t i = (uint8_t)(identifyAllNode + 1); i <= 32; i++) {
+                    if (pingScanFound[i]) { next = i; break; }
+                }
+                if (next) {
+                    identifyAllNode = next;
+                    identifyAllStep = 0;
+                    identifyAllNextMs = millis() + 30;
+                } else {
+                    identifyAllRunning = false;
+                    Serial.println("[IDENT-ALL] Done (all found nodes identified)");
+                }
                 break;
+            }
         }
     }
 
-    // Dunker operation sequencer (non-blocking)
-    if (dunkerOpInProgress && !dunkerSdo.isBusy() && (int32_t)(millis() - dunkerOpNextMs) >= 0) {
-        dunkerSdo.setNodeId(DUNKER_NODE_ID);
+    // Standard node-detail read sequencer: 1018h identity + 1001h error register
+    stdSdo.update();
+    if (stdReadRunning && !stdSdo.isBusy() && (int32_t)(millis() - stdReadNextMs) >= 0) {
+        switch (stdReadStep) {
+            case 0:
+                stdReadStep = 1;
+                stdSdo.readAsync(0x1018, 0x01, [](SdoResult r, uint32_t v){
+                    if (r == SDO_OK) master.node(stdReadNode).vendorId = v;
+                });
+                stdReadNextMs = millis() + 20;
+                break;
+            case 1:
+                stdReadStep = 2;
+                stdSdo.readAsync(0x1018, 0x02, [](SdoResult r, uint32_t v){
+                    if (r == SDO_OK) master.node(stdReadNode).productCode = v;
+                });
+                stdReadNextMs = millis() + 20;
+                break;
+            case 2:
+                stdReadStep = 3;
+                stdSdo.readAsync(0x1018, 0x03, [](SdoResult r, uint32_t v){
+                    if (r == SDO_OK) master.node(stdReadNode).revision = v;
+                });
+                stdReadNextMs = millis() + 20;
+                break;
+            case 3:
+                stdReadStep = 4;
+                stdSdo.readAsync(0x1018, 0x04, [](SdoResult r, uint32_t v){
+                    if (r == SDO_OK) master.node(stdReadNode).serial = v;
+                });
+                stdReadNextMs = millis() + 20;
+                break;
+            case 4:
+                stdReadStep = 5;
+                stdSdo.readAsync(0x1001, 0x00, [](SdoResult r, uint32_t v){
+                    if (r == SDO_OK) { stdErrReg = (uint8_t)(v & 0xFF); stdErrRegValid = true; }
+                });
+                stdReadNextMs = millis() + 20;
+                break;
+            default: {
+                auto& dn = master.node(stdReadNode);
+                dn.sdoOk = (dn.vendorId != 0 || dn.productCode != 0);
+                dn.known = classifyByIdentity(dn.vendorId, dn.productCode);
+                Serial.printf("[STD] Node %u: vendor=0x%08lX product=0x%08lX rev=0x%08lX ser=0x%08lX err1001=%s0x%02X\n",
+                              (unsigned)stdReadNode,
+                              (unsigned long)dn.vendorId, (unsigned long)dn.productCode,
+                              (unsigned long)dn.revision, (unsigned long)dn.serial,
+                              stdErrRegValid ? "" : "(invalid) ", (unsigned)stdErrReg);
+                stdReadRunning = false;
 
-        // Read-status mini sequence continuation
-        if (dunkerOpStep == 100) {
-            dunkerOpStep = 101;
-            dunkerSdo.readAsync(0x603F, 0x00, [](SdoResult r, uint32_t v){
-                Serial.printf("[DUNKER] 0x603F Error code: res=%u val=0x%04lX\n", (unsigned)r, (unsigned long)(v & 0xFFFF));
-            });
-            dunkerOpNextMs = millis() + 20;
-        } else if (dunkerOpStep == 101) {
-            dunkerOpStep = 102;
-            dunkerSdo.readAsync(0x1001, 0x00, [](SdoResult r, uint32_t v){
-                Serial.printf("[DUNKER] 0x1001 Error register: res=%u val=0x%02lX\n", (unsigned)r, (unsigned long)(v & 0xFF));
-            });
-            dunkerOpNextMs = millis() + 20;
-        } else if (dunkerOpStep == 102) {
-            dunkerOpInProgress = false;
-        }
-
-        // Enable DS402 sequence: 0x06 -> 0x07 -> 0x0F with interleaved status reads
-        else {
-            switch (dunkerOpStep) {
-                case 0:
-                    dunkerOpStep = 1;
-                    Serial.println("[DUNKER] Step0: Fault reset (0x6040=0x0080)");
-                    dunkerSdo.writeAsync(0x6040, 0x00, 0x0080, 2);
-                    dunkerOpNextMs = millis() + 100;
-                    break;
-                case 1:
-                    dunkerOpStep = 2;
-                    Serial.println("[DUNKER] Step1: Shutdown (0x6040=0x0006)");
-                    dunkerSdo.writeAsync(0x6040, 0x00, 0x0006, 2);
-                    dunkerOpNextMs = millis() + 100;
-                    break;
-                case 2:
-                    dunkerOpStep = 3;
-                    Serial.println("[DUNKER] Step2: Switch on (0x6040=0x0007)");
-                    dunkerSdo.writeAsync(0x6040, 0x00, 0x0007, 2);
-                    dunkerOpNextMs = millis() + 100;
-                    break;
-                case 3:
-                    dunkerOpStep = 4;
-                    Serial.println("[DUNKER] Step3: Enable operation (0x6040=0x000F)");
-                    dunkerSdo.writeAsync(0x6040, 0x00, 0x000F, 2);
-                    dunkerOpNextMs = millis() + 100;
-                    break;
-                case 4:
-                    dunkerOpStep = 5;
-                    Serial.println("[DUNKER] Step4: Read Statusword (0x6041)");
-                    dunkerSdo.readAsync(0x6041, 0x00, [](SdoResult r, uint32_t v){
-                        Serial.printf("[DUNKER] 0x6041 Statusword: res=%u val=0x%04lX\n", (unsigned)r, (unsigned long)(v & 0xFFFF));
-                    });
-                    dunkerOpNextMs = millis() + 50;
-                    break;
-                default:
-                    Serial.println("[DUNKER] Enable sequence done");
-                    dunkerOpInProgress = false;
-                    break;
+                // Refresh the detail view (and list) with freshly read values
+                lvgl_port_lock(-1);
+                refreshNodeDetail();
+                refreshStartMenuList();
+                lvgl_port_unlock();
+                break;
             }
         }
     }
@@ -889,6 +970,47 @@ void loop()
         ap04Dev->update();
     }
 
+    // Auto-switch to Dunker DS402 page (create once)
+    if (!dunkerPageLoaded && selectedNodeId >= 1 && selectedNodeId <= 127) {
+        const auto& dn = master.node(selectedNodeId);
+        if (!dn.identifyInProgress && dn.known == KnownDeviceType::Dunker_75CI) {
+            dunkerPageLoaded = true;
+
+            // Reuse one heap object across connects (rebind -> no leak, no RX race)
+            if (!dunkerDev) dunkerDev = new DunkerDrive(&canDriver, selectedNodeId);
+            else            dunkerDev->rebind(selectedNodeId);
+
+            lvgl_port_lock(-1);
+
+            Dunker_Callbacks dcbs;
+            dcbs.onBack = [](){
+                Serial.println("[UI] Dunker: back to main");
+                dunkerUiIsActive = false;   // stop RX processing BEFORE leaving
+                dunkerPageLoaded = false;
+                navPendingDisconnect = true;
+                navPendingUiSwitch = true;
+            };
+            dcbs.onCommand = [](DunkerUiCmd c){
+                if (!dunkerDev) return;
+                switch (c) {
+                    case DunkerUiCmd::FaultReset:      dunkerDev->cmdFaultReset();      break;
+                    case DunkerUiCmd::Shutdown:        dunkerDev->cmdShutdown();        break;
+                    case DunkerUiCmd::SwitchOn:        dunkerDev->cmdSwitchOn();        break;
+                    case DunkerUiCmd::EnableOperation: dunkerDev->cmdEnableOperation(); break;
+                    case DunkerUiCmd::DisableVoltage:  dunkerDev->cmdDisableVoltage();  break;
+                }
+            };
+            dunkerUi.setCallbacks(dcbs);
+            dunkerUi.create(selectedNodeId);
+            dunkerUi.load();
+
+            dunkerUiIsActive = true;   // activate RX processing only after full setup
+            master.nmtStart();
+
+            lvgl_port_unlock();
+        }
+    }
+
     // UI update
     if (now - lastUiUpdate >= Config::UI_UPDATE_MS) {
         lastUiUpdate = now;
@@ -897,6 +1019,7 @@ void loop()
             lvgl_port_lock(-1);
             refreshNodeDetail();
             if (ap04UiIsActive) refreshAp04();
+            if (dunkerUiIsActive && dunkerDev) dunkerUi.update(dunkerDev->getData());
             lvgl_port_unlock();
         }
     }
