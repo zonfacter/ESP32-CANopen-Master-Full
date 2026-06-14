@@ -179,36 +179,49 @@ private:
     }
 
     void buildMotionTab(lv_obj_t* t) {
-        m_lblMode   = mkLabel(t, "Mode 6061h: ---",     8,   8, 0xFFBB33, &lv_font_montserrat_18);
-        m_lblActPos = mkLabel(t, "Act. Pos 6064h: ---", 400, 8, 0xFFFFFF, &lv_font_montserrat_18);
-        m_lblActVel = mkLabel(t, "Act. Vel 606Ch: ---", 400, 40, 0xCCCCCC, &lv_font_montserrat_14);
+        // Scrollable form container; shrinks to the area above the keyboard on
+        // focus (iPhone-style) so all controls stay reachable by scrolling.
+        m_motCont = lv_obj_create(t);
+        lv_obj_set_size(m_motCont, lv_pct(100), lv_pct(100));
+        lv_obj_set_pos(m_motCont, 0, 0);
+        lv_obj_set_style_bg_opa(m_motCont, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(m_motCont, 0, 0);
+        lv_obj_set_style_radius(m_motCont, 0, 0);
+        lv_obj_set_style_pad_all(m_motCont, 0, 0);
+        lv_obj_set_scroll_dir(m_motCont, LV_DIR_VER);
+        lv_obj_set_scrollbar_mode(m_motCont, LV_SCROLLBAR_MODE_AUTO);
+        lv_obj_t* c = m_motCont;
+
+        m_lblMode   = mkLabel(c, "Mode 6061h: ---",     8,   8, 0xFFBB33, &lv_font_montserrat_18);
+        m_lblActPos = mkLabel(c, "Act. Pos 6064h: ---", 400, 8, 0xFFFFFF, &lv_font_montserrat_18);
+        m_lblActVel = mkLabel(c, "Act. Vel 606Ch: ---", 400, 40, 0xCCCCCC, &lv_font_montserrat_14);
 
         // Mode buttons
-        mkBtn(t, "PP",     0x0066CC, 8,   44, 110, 44, DunkerUI::onModePpClicked);
-        mkBtn(t, "PV",     0x0066CC, 128, 44, 110, 44, DunkerUI::onModePvClicked);
-        mkBtn(t, "HOMING", 0x0066CC, 248, 44, 120, 44, DunkerUI::onModeHomeClicked);
+        mkBtn(c, "PP",     0x0066CC, 8,   44, 110, 44, DunkerUI::onModePpClicked);
+        mkBtn(c, "PV",     0x0066CC, 128, 44, 110, 44, DunkerUI::onModePvClicked);
+        mkBtn(c, "HOMING", 0x0066CC, 248, 44, 120, 44, DunkerUI::onModeHomeClicked);
 
         // Target position + velocity inputs
-        mkLabel(t, "Target:", 8, 108, 0xFFFFFF, &lv_font_montserrat_14);
-        m_taTarget = mkTextArea(t, "0", "0123456789-", 80, 102, 180);
-        mkLabel(t, "Vel:", 280, 108, 0xFFFFFF, &lv_font_montserrat_14);
-        m_taVel = mkTextArea(t, "0", "0123456789", 330, 102, 150);
+        mkLabel(c, "Target:", 8, 108, 0xFFFFFF, &lv_font_montserrat_14);
+        m_taTarget = mkTextArea(c, "0", "0123456789-", 80, 102, 180);
+        mkLabel(c, "Vel:", 280, 108, 0xFFFFFF, &lv_font_montserrat_14);
+        m_taVel = mkTextArea(c, "0", "0123456789", 330, 102, 150);
 
-        mkBtn(t, "GO", 0x007744, 500, 100, 130, 50, DunkerUI::onGoClicked);
-        mkBtn(t, "STOP", 0x884444, 640, 100, 120, 50, DunkerUI::onHaltClicked);
+        mkBtn(c, "GO", 0x007744, 500, 100, 130, 50, DunkerUI::onGoClicked);
+        mkBtn(c, "STOP", 0x884444, 640, 100, 120, 50, DunkerUI::onHaltClicked);
 
         // Jog (momentary: press = move, release = stop)
-        lv_obj_t* jm = mkBtn(t, "JOG -", 0xCC6600, 8,   170, 175, 70, nullptr);
+        lv_obj_t* jm = mkBtn(c, "JOG -", 0xCC6600, 8,   170, 175, 70, nullptr);
         lv_obj_add_event_cb(jm, DunkerUI::onJogMinus, LV_EVENT_PRESSED,  nullptr);
         lv_obj_add_event_cb(jm, DunkerUI::onJogStop,  LV_EVENT_RELEASED, nullptr);
-        lv_obj_t* jp = mkBtn(t, "JOG +", 0xCC6600, 193, 170, 175, 70, nullptr);
+        lv_obj_t* jp = mkBtn(c, "JOG +", 0xCC6600, 193, 170, 175, 70, nullptr);
         lv_obj_add_event_cb(jp, DunkerUI::onJogPlus, LV_EVENT_PRESSED,  nullptr);
         lv_obj_add_event_cb(jp, DunkerUI::onJogStop, LV_EVENT_RELEASED, nullptr);
 
         // Shared numeric keyboard (overlay on the screen, hidden until focus)
         m_kb = lv_keyboard_create(m_screen);
         lv_keyboard_set_mode(m_kb, LV_KEYBOARD_MODE_NUMBER);
-        lv_obj_set_size(m_kb, 800, 210);
+        lv_obj_set_size(m_kb, 800, KB_HEIGHT);
         lv_obj_align(m_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
         lv_obj_add_flag(m_kb, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_event_cb(m_kb, DunkerUI::onKbReady, LV_EVENT_READY,  nullptr);
@@ -335,23 +348,37 @@ private:
     static void onBrakeReleaseClicked(lv_event_t*) { if (s_inst && s_inst->m_cbs.onBrake) s_inst->m_cbs.onBrake(true); }
     static void onBrakeEngageClicked(lv_event_t*)  { if (s_inst && s_inst->m_cbs.onBrake) s_inst->m_cbs.onBrake(false); }
 
-    // Keyboard show/hide
+    // Keyboard show/hide with iPhone-style content scrolling.
     static void onTaFocused(lv_event_t* ev) {
         if (!s_inst || !s_inst->m_kb) return;
         lv_obj_t* ta = lv_event_get_target(ev);
         lv_keyboard_set_textarea(s_inst->m_kb, ta);
         lv_obj_clear_flag(s_inst->m_kb, LV_OBJ_FLAG_HIDDEN);
+        if (s_inst->m_motCont) {
+            // Shrink the form to the visible area above the keyboard, then bring
+            // the focused field into view (lower controls stay scrollable).
+            lv_obj_set_height(s_inst->m_motCont, 480 - KB_HEIGHT - TAB_TOP);
+            lv_obj_scroll_to_view(ta, LV_ANIM_ON);
+        }
     }
     static void onKbReady(lv_event_t*) {
         if (!s_inst || !s_inst->m_kb) return;
         lv_obj_add_flag(s_inst->m_kb, LV_OBJ_FLAG_HIDDEN);
+        if (s_inst->m_motCont) {
+            lv_obj_set_height(s_inst->m_motCont, lv_pct(100));
+            lv_obj_scroll_to_y(s_inst->m_motCont, 0, LV_ANIM_ON);
+        }
     }
 
     // ---------------- State ----------------
+    static constexpr int KB_HEIGHT = 210;
+    static constexpr int TAB_TOP   = 100; // header (56) + tab bar (44) in screen coords
+
     Dunker_Callbacks m_cbs;
     uint8_t m_nodeId = 0;
 
     lv_obj_t* m_screen = nullptr;
+    lv_obj_t* m_motCont = nullptr;
 
     // DS402 tab
     lv_obj_t* m_lblStatusword = nullptr;

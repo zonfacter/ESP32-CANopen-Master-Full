@@ -86,10 +86,23 @@ public:
         lv_obj_set_style_text_color(backLbl, lv_color_hex(0xFFFFFF), 0);
         lv_obj_center(backLbl);
 
+        // Scrollable content container (everything below the header). When the
+        // keyboard appears we shrink this to the area above it and scroll the
+        // focused field into view (iPhone-style), so nothing stays hidden.
+        m_content = lv_obj_create(m_screen);
+        lv_obj_set_pos(m_content, 0, 60);
+        lv_obj_set_size(m_content, 800, 420);
+        lv_obj_set_style_bg_opa(m_content, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(m_content, 0, 0);
+        lv_obj_set_style_radius(m_content, 0, 0);
+        lv_obj_set_style_pad_all(m_content, 0, 0);
+        lv_obj_set_scroll_dir(m_content, LV_DIR_VER);
+        lv_obj_set_scrollbar_mode(m_content, LV_SCROLLBAR_MODE_AUTO);
+
         // Info card (left column = NMT state, right column = identity + error reg)
-        lv_obj_t* card = lv_obj_create(m_screen);
+        lv_obj_t* card = lv_obj_create(m_content);
         lv_obj_set_size(card, 620, 120);
-        lv_obj_set_pos(card, 10, 80);
+        lv_obj_set_pos(card, 10, 20);
         lv_obj_set_style_bg_color(card, lv_color_hex(0x12122A), 0);
         lv_obj_set_style_border_color(card, lv_color_hex(0x0F3460), 0);
         lv_obj_set_style_border_width(card, 2, 0);
@@ -142,29 +155,28 @@ public:
         lv_obj_set_pos(m_lblErr, 320, 92);
 
         // READ INFO button (reads 1018h identity + 1001h error register via SDO)
-        m_btnReadInfo = makeBtn("READ\nINFO", lv_color_hex(0x4A2C82), 640, 80, 150, 120,
+        m_btnReadInfo = makeBtn("READ\nINFO", lv_color_hex(0x4A2C82), 640, 20, 150, 120,
                                 NodeDetailUI::onReadInfoClicked);
 
         const int x = 10;
 
-        // Config row (Node-ID) - placed directly under the info card, ABOVE the
-        // NMT buttons, so the bottom on-screen keyboard never covers the field.
-        m_taNodeId = lv_textarea_create(m_screen);
+        // Config row (Node-ID)
+        m_taNodeId = lv_textarea_create(m_content);
         lv_obj_set_size(m_taNodeId, 160, 48);
-        lv_obj_set_pos(m_taNodeId, x, 208);
+        lv_obj_set_pos(m_taNodeId, x, 148);
         lv_textarea_set_one_line(m_taNodeId, true);
         lv_textarea_set_accepted_chars(m_taNodeId, "0123456789");
         lv_textarea_set_max_length(m_taNodeId, 3);
         lv_textarea_set_text(m_taNodeId, "1");
         lv_textarea_set_placeholder_text(m_taNodeId, "Node-ID");
-        m_btnSetNodeId = makeBtn("SET NODE-ID", lv_color_hex(0x1D4ED8), x + 180, 206, 250, 52,
+        m_btnSetNodeId = makeBtn("SET NODE-ID", lv_color_hex(0x1D4ED8), x + 180, 146, 250, 52,
                                  NodeDetailUI::onSetNodeIdClicked);
 
         // NMT buttons
         const int w = 250;
         const int h = 64;
         const int gap = 14;
-        int y = 274;
+        int y = 214;
         m_btnStart = makeBtn("NMT START", lv_color_hex(0x007744), x, y, w, h, NodeDetailUI::onStartClicked);
         m_btnPreOp = makeBtn("NMT PRE-OP", lv_color_hex(0xCC6600), x + (w + gap), y, w, h, NodeDetailUI::onPreOpClicked);
         m_btnStop  = makeBtn("NMT STOP", lv_color_hex(0x444444), x + 2*(w + gap), y, w, h, NodeDetailUI::onStopClicked);
@@ -173,11 +185,11 @@ public:
         m_btnResetNode = makeBtn("RESET NODE", lv_color_hex(0x666666), x, y, w, h, NodeDetailUI::onResetNodeClicked);
         m_btnResetComm = makeBtn("RESET COMM", lv_color_hex(0x666666), x + (w + gap), y, w, h, NodeDetailUI::onResetCommClicked);
 
-        // On-screen numeric keypad: hidden until the Node-ID field is focused,
-        // bottom-aligned (no longer parked off-screen at y=520).
+        // On-screen numeric keypad (sibling of m_content so it never scrolls);
+        // hidden until the Node-ID field is focused, bottom-aligned.
         m_kb = lv_keyboard_create(m_screen);
         lv_keyboard_set_mode(m_kb, LV_KEYBOARD_MODE_NUMBER);
-        lv_obj_set_size(m_kb, 800, 190);
+        lv_obj_set_size(m_kb, 800, KB_HEIGHT);
         lv_obj_align(m_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
         lv_obj_add_flag(m_kb, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_event_cb(m_kb, NodeDetailUI::onKbReady, LV_EVENT_READY,  nullptr);
@@ -287,16 +299,22 @@ private:
         if (s_inst && s_inst->m_cbs.onReadInfo) s_inst->m_cbs.onReadInfo(s_inst->m_info.nodeId);
     }
 
-    // Show the numeric keyboard when the Node-ID field gains focus, hide on OK/cancel.
+    // Keyboard show/hide with iPhone-style content scrolling.
     static void onTaFocused(lv_event_t* ev) {
         if (!s_inst || !s_inst->m_kb) return;
         lv_obj_t* ta = lv_event_get_target(ev);
         lv_keyboard_set_textarea(s_inst->m_kb, ta);
         lv_obj_clear_flag(s_inst->m_kb, LV_OBJ_FLAG_HIDDEN);
+        // Shrink the scroll area to the space above the keyboard, then bring the
+        // focused field into view. Lower widgets stay reachable by scrolling.
+        lv_obj_set_height(s_inst->m_content, 480 - HEADER_H - KB_HEIGHT);
+        lv_obj_scroll_to_view(ta, LV_ANIM_ON);
     }
     static void onKbReady(lv_event_t*) {
         if (!s_inst || !s_inst->m_kb) return;
         lv_obj_add_flag(s_inst->m_kb, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_height(s_inst->m_content, 480 - HEADER_H);
+        lv_obj_scroll_to_y(s_inst->m_content, 0, LV_ANIM_ON);
     }
 
     // Render the product-code as ASCII if its bytes are printable (e.g. AP04 = "CAN").
@@ -335,7 +353,7 @@ private:
 
     lv_obj_t* makeBtn(const char* text, lv_color_t bg, int x, int y, int w, int h,
                       lv_event_cb_t cb) {
-        lv_obj_t* b = lv_btn_create(m_screen);
+        lv_obj_t* b = lv_btn_create(m_content);
         lv_obj_set_size(b, w, h);
         lv_obj_set_pos(b, x, y);
         lv_obj_set_style_bg_color(b, bg, 0);
@@ -349,7 +367,11 @@ private:
         return b;
     }
 
+    static constexpr int HEADER_H = 60;
+    static constexpr int KB_HEIGHT = 190;
+
     lv_obj_t* m_screen = nullptr;
+    lv_obj_t* m_content = nullptr;
     NodeDetail_Info m_info;
     NodeDetail_Callbacks m_cbs;
 
