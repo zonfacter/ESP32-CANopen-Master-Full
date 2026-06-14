@@ -208,7 +208,7 @@ private:
         // Shared numeric keyboard (overlay on the screen, hidden until focus)
         m_kb = lv_keyboard_create(m_screen);
         lv_keyboard_set_mode(m_kb, LV_KEYBOARD_MODE_NUMBER);
-        lv_obj_set_size(m_kb, 800, 240);
+        lv_obj_set_size(m_kb, 800, 210);
         lv_obj_align(m_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
         lv_obj_add_flag(m_kb, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_event_cb(m_kb, DunkerUI::onKbReady, LV_EVENT_READY,  nullptr);

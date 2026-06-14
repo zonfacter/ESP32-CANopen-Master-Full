@@ -145,13 +145,26 @@ public:
         m_btnReadInfo = makeBtn("READ\nINFO", lv_color_hex(0x4A2C82), 640, 80, 150, 120,
                                 NodeDetailUI::onReadInfoClicked);
 
-        // NMT buttons
-        int x = 10;
-        int y = 210;
-        const int w = 250;
-        const int h = 70;
-        const int gap = 15;
+        const int x = 10;
 
+        // Config row (Node-ID) - placed directly under the info card, ABOVE the
+        // NMT buttons, so the bottom on-screen keyboard never covers the field.
+        m_taNodeId = lv_textarea_create(m_screen);
+        lv_obj_set_size(m_taNodeId, 160, 48);
+        lv_obj_set_pos(m_taNodeId, x, 208);
+        lv_textarea_set_one_line(m_taNodeId, true);
+        lv_textarea_set_accepted_chars(m_taNodeId, "0123456789");
+        lv_textarea_set_max_length(m_taNodeId, 3);
+        lv_textarea_set_text(m_taNodeId, "1");
+        lv_textarea_set_placeholder_text(m_taNodeId, "Node-ID");
+        m_btnSetNodeId = makeBtn("SET NODE-ID", lv_color_hex(0x1D4ED8), x + 180, 206, 250, 52,
+                                 NodeDetailUI::onSetNodeIdClicked);
+
+        // NMT buttons
+        const int w = 250;
+        const int h = 64;
+        const int gap = 14;
+        int y = 274;
         m_btnStart = makeBtn("NMT START", lv_color_hex(0x007744), x, y, w, h, NodeDetailUI::onStartClicked);
         m_btnPreOp = makeBtn("NMT PRE-OP", lv_color_hex(0xCC6600), x + (w + gap), y, w, h, NodeDetailUI::onPreOpClicked);
         m_btnStop  = makeBtn("NMT STOP", lv_color_hex(0x444444), x + 2*(w + gap), y, w, h, NodeDetailUI::onStopClicked);
@@ -160,25 +173,16 @@ public:
         m_btnResetNode = makeBtn("RESET NODE", lv_color_hex(0x666666), x, y, w, h, NodeDetailUI::onResetNodeClicked);
         m_btnResetComm = makeBtn("RESET COMM", lv_color_hex(0x666666), x + (w + gap), y, w, h, NodeDetailUI::onResetCommClicked);
 
-        // Config row (AP04 / generic): Node-ID set
-        y += h + gap;
-        m_taNodeId = lv_textarea_create(m_screen);
-        lv_obj_set_size(m_taNodeId, 160, 52);
-        lv_obj_set_pos(m_taNodeId, x, y + 9);
-        lv_textarea_set_one_line(m_taNodeId, true);
-        lv_textarea_set_accepted_chars(m_taNodeId, "0123456789");
-        lv_textarea_set_max_length(m_taNodeId, 3);
-        lv_textarea_set_text(m_taNodeId, "1");
-        lv_textarea_set_placeholder_text(m_taNodeId, "Node-ID");
-
-        // On-screen numeric keypad (simple)
+        // On-screen numeric keypad: hidden until the Node-ID field is focused,
+        // bottom-aligned (no longer parked off-screen at y=520).
         m_kb = lv_keyboard_create(m_screen);
         lv_keyboard_set_mode(m_kb, LV_KEYBOARD_MODE_NUMBER);
-        lv_keyboard_set_textarea(m_kb, m_taNodeId);
-        lv_obj_set_width(m_kb, 780);
-        lv_obj_set_pos(m_kb, 10, 520);
-
-        m_btnSetNodeId = makeBtn("SET NODE-ID", lv_color_hex(0x1D4ED8), x + 180, y, 250, h, NodeDetailUI::onSetNodeIdClicked);
+        lv_obj_set_size(m_kb, 800, 190);
+        lv_obj_align(m_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_obj_add_flag(m_kb, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_event_cb(m_kb, NodeDetailUI::onKbReady, LV_EVENT_READY,  nullptr);
+        lv_obj_add_event_cb(m_kb, NodeDetailUI::onKbReady, LV_EVENT_CANCEL, nullptr);
+        lv_obj_add_event_cb(m_taNodeId, NodeDetailUI::onTaFocused, LV_EVENT_FOCUSED, nullptr);
 
         s_inst = this;
     }
@@ -281,6 +285,18 @@ private:
 
     static void onReadInfoClicked(lv_event_t*) {
         if (s_inst && s_inst->m_cbs.onReadInfo) s_inst->m_cbs.onReadInfo(s_inst->m_info.nodeId);
+    }
+
+    // Show the numeric keyboard when the Node-ID field gains focus, hide on OK/cancel.
+    static void onTaFocused(lv_event_t* ev) {
+        if (!s_inst || !s_inst->m_kb) return;
+        lv_obj_t* ta = lv_event_get_target(ev);
+        lv_keyboard_set_textarea(s_inst->m_kb, ta);
+        lv_obj_clear_flag(s_inst->m_kb, LV_OBJ_FLAG_HIDDEN);
+    }
+    static void onKbReady(lv_event_t*) {
+        if (!s_inst || !s_inst->m_kb) return;
+        lv_obj_add_flag(s_inst->m_kb, LV_OBJ_FLAG_HIDDEN);
     }
 
     // Render the product-code as ASCII if its bytes are printable (e.g. AP04 = "CAN").
