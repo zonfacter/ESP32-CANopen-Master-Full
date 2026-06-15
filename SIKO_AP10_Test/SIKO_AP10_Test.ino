@@ -370,6 +370,7 @@ static void startAutoBaudScan()
     master.resetDiscovery();
 
     Serial.println("[SCAN] Auto-Baud Scan gestartet (aktiv: SDO-Ping 1..32 je Baud)");
+    startUi.setStatus(LV_SYMBOL_REFRESH "  Auto-Scan laeuft...", 0);  // called under LVGL lock (button cb)
 
     activeBaud = Config::SCAN_BAUDS[scanBaudIdx];
     Serial.printf("[SCAN] Set baud %lu\n", (unsigned long)activeBaud);
@@ -412,7 +413,10 @@ static void scanTick(uint32_t now)
     if (anySeen) {
         Serial.printf("[SCAN] Treffer @ %lu bps\n", (unsigned long)activeBaud);
         scanRunning = false;
+        char st[64];
+        snprintf(st, sizeof(st), LV_SYMBOL_OK "  Treffer @ %lu kBit/s", (unsigned long)(activeBaud / 1000));
         lvgl_port_lock(-1);
+        startUi.setStatus(st, 1);
         refreshStartMenuList();
         lvgl_port_unlock();
         master.setMode(MasterMode::Idle);
@@ -425,6 +429,7 @@ static void scanTick(uint32_t now)
         scanRunning = false;
         master.setMode(MasterMode::Idle);
         lvgl_port_lock(-1);
+        startUi.setStatus(LV_SYMBOL_WARNING "  Kein CANopen-Traffic gefunden (alle Baudraten)", 2);
         refreshStartMenuList();
         lvgl_port_unlock();
         return;
@@ -534,6 +539,7 @@ void setup()
         memset(pingScanFound, 0, sizeof(pingScanFound));
         pingScanBaudSnapshot = activeBaud;
         Serial.printf("[PING] Start SDO ping scan 1..32 @ %lu bps\n", (unsigned long)pingScanBaudSnapshot);
+        startUi.setStatus(LV_SYMBOL_REFRESH "  Ping-Scan 1..32 laeuft...", 0);  // button cb -> under LVGL lock
 
         // Helpful: ensure sniffer is ON so user sees traffic
         if (!snifferEnabled) {
@@ -552,10 +558,12 @@ void setup()
         }
         if (pingScanFoundCount == 0) {
             Serial.println("[IDENT] No nodes found (run PING SCAN first)");
+            startUi.setStatus(LV_SYMBOL_WARNING "  Identify: erst PING SCAN ausfuehren", 2);
             return;
         }
         if (activeBaud != pingScanBaudSnapshot) {
             Serial.println("[IDENT] Baud differs from last scan; please keep baud fixed");
+            startUi.setStatus(LV_SYMBOL_WARNING "  Identify: Baud seit Scan geaendert", 2);
             return;
         }
 
@@ -772,15 +780,21 @@ void loop()
                 if (doneDue == 0) doneDue = t + 250;
                 if ((int32_t)(t - doneDue) >= 0) {
                     Serial.printf("[PING] Done. Found %u nodes: ", (unsigned)pingScanFoundCount);
+                    char st[80];
+                    int p = snprintf(st, sizeof(st), LV_SYMBOL_OK "  Ping: %u Node(s):", (unsigned)pingScanFoundCount);
                     for (uint8_t i = 1; i <= 32; i++) {
-                        if (pingScanFound[i]) Serial.printf("%u ", (unsigned)i);
+                        if (pingScanFound[i]) {
+                            Serial.printf("%u ", (unsigned)i);
+                            if (p < (int)sizeof(st) - 4) p += snprintf(st + p, sizeof(st) - p, " %u", (unsigned)i);
+                        }
                     }
                     Serial.println();
                     pingScanRunning = false;
                     doneDue = 0;
 
-                    // Show freshly discovered nodes in the start-menu list
+                    // Show freshly discovered nodes in the start-menu list + status
                     lvgl_port_lock(-1);
+                    startUi.setStatus(st, pingScanFoundCount ? 1 : 2);
                     refreshStartMenuList();
                     lvgl_port_unlock();
                 }
@@ -860,8 +874,12 @@ void loop()
                               (unsigned long)dn.serial,
                               typeStr);
 
-                // Reflect the new classification in the list immediately
+                // Reflect the new classification in the list immediately + status
+                char ist[64];
+                snprintf(ist, sizeof(ist), LV_SYMBOL_EYE_OPEN "  Identify Node %u: %s",
+                         (unsigned)identifyAllNode, typeStr);
                 lvgl_port_lock(-1);
+                startUi.setStatus(ist, 0);
                 refreshStartMenuList();
                 lvgl_port_unlock();
 
@@ -877,6 +895,9 @@ void loop()
                 } else {
                     identifyAllRunning = false;
                     Serial.println("[IDENT-ALL] Done (all found nodes identified)");
+                    lvgl_port_lock(-1);
+                    startUi.setStatus(LV_SYMBOL_OK "  Identify fertig", 1);
+                    lvgl_port_unlock();
                 }
                 break;
             }
