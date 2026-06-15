@@ -738,15 +738,21 @@ void loop()
         identifySdo.setNodeId(identifyAllNode);
 
         switch (identifyAllStep) {
-            case 0:
+            case 0: {
                 identifyAllStep = 1;
-                master.node(identifyAllNode).identifyInProgress = true;
+                // Clear any previous identity so a timed-out/aborted read can't
+                // reuse stale values and misclassify (e.g. after a node swap).
+                auto& dn0 = master.node(identifyAllNode);
+                dn0.vendorId = dn0.productCode = dn0.revision = dn0.serial = 0;
+                dn0.sdoOk = false;
+                dn0.identifyInProgress = true;
                 Serial.printf("[IDENT-ALL] Node %u: read 1018h:01 Vendor ID\n", (unsigned)identifyAllNode);
                 identifySdo.readAsync(0x1018, 0x01, [](SdoResult r, uint32_t v){
                     if (r == SDO_OK) master.node(identifyAllNode).vendorId = v;
                 });
                 identifyAllNextMs = millis() + 20;
                 break;
+            }
             case 1:
                 identifyAllStep = 2;
                 Serial.printf("[IDENT-ALL] Node %u: read 1018h:02 Product Code\n", (unsigned)identifyAllNode);
@@ -827,13 +833,18 @@ void loop()
     stdSdo.update();
     if (stdReadRunning && !stdSdo.isBusy() && (int32_t)(millis() - stdReadNextMs) >= 0) {
         switch (stdReadStep) {
-            case 0:
+            case 0: {
                 stdReadStep = 1;
+                // Clear previous identity so a failed read can't reuse stale values.
+                auto& dns = master.node(stdReadNode);
+                dns.vendorId = dns.productCode = dns.revision = dns.serial = 0;
+                dns.sdoOk = false;
                 stdSdo.readAsync(0x1018, 0x01, [](SdoResult r, uint32_t v){
                     if (r == SDO_OK) master.node(stdReadNode).vendorId = v;
                 });
                 stdReadNextMs = millis() + 20;
                 break;
+            }
             case 1:
                 stdReadStep = 2;
                 stdSdo.readAsync(0x1018, 0x02, [](SdoResult r, uint32_t v){
@@ -987,6 +998,9 @@ void loop()
                 Serial.println("[UI] Dunker: back to main");
                 dunkerUiIsActive = false;   // stop RX processing BEFORE leaving
                 dunkerPageLoaded = false;
+                // Clear the selection so the auto-route block does not immediately
+                // recreate the Dunker page (and leak LVGL screens) on the same pass.
+                selectedNodeId = 0;
                 navPendingDisconnect = true;
                 navPendingUiSwitch = true;
             };
