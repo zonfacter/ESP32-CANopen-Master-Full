@@ -291,9 +291,9 @@ private:
         mkBtn(t, "APPLY (LSS)", 0x007744, 8, 178, 220, 56, DunkerUI::onCfgApply);
 
         mkLabel(t,
-            "WARNUNG: LSS-Global wirkt auf ALLE LSS-Knoten. Selective braucht die\n"
-            "volle LSS-Adresse inkl. Serial. Im Zweifel nur EIN Geraet am Bus.",
-            250, 186, 0xFF6666, &lv_font_montserrat_14);
+            "Dunker: Node-ID via SDO 0x2000 (danach Power-Cycle).\n"
+            "Baud-Subindex noch offen - erst Handbuch bestaetigen.",
+            250, 186, 0xFFBB33, &lv_font_montserrat_14);
 
         m_lblLssStatus = mkLabel(t, "Status: ---", 8, 250, 0xAAAAAA, &lv_font_montserrat_14);
 

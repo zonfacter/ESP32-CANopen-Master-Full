@@ -1125,22 +1125,18 @@ void loop()
             // M6: I/O + brake
             dcbs.onSetOutput = [](uint8_t bit, bool on){ if (dunkerDev) dunkerDev->setOutputBit(bit, on); };
             dcbs.onBrake     = [](bool release){ if (dunkerDev) dunkerDev->setBrake(release); };
-            // Cfg: LSS node-id / baud (selective if the full LSS address incl. serial
-            // is known, else global -- which only safe with a single LSS node on bus)
+            // Cfg: Dunker node-id via manufacturer SDO 0x2000 (LSS is not supported
+            // by this drive -- confirmed on hardware). Baud is intentionally NOT sent
+            // yet: the BG manual lists subindex 2 for BOTH node-id and baud, which is
+            // contradictory, so the baud subindex must be confirmed first.
             dcbs.onLssApply  = [](uint8_t newNodeId, uint32_t baud){
-                const auto& dn = master.node(selectedNodeId);
-                bool ok;
-                if (dn.serial != 0) {
-                    Serial.printf("[LSS] Selective cfg node %u -> id=%u baud=%lu\n",
-                                  (unsigned)selectedNodeId, (unsigned)newNodeId, (unsigned long)baud);
-                    ok = lssMaster.configureSelective(dn.vendorId, dn.productCode, dn.revision,
-                                                      dn.serial, newNodeId, baud, true, baud != 0);
+                if (!dunkerDev) return;
+                dunkerDev->cfgNodeIdSdo(newNodeId);
+                if (baud != 0) {
+                    dunkerUi.setLssStatus("Node-ID 0x2000 gesendet. Baud: Subindex offen (Handbuch).", true);
                 } else {
-                    Serial.println("[LSS] No serial in identity -> GLOBAL cfg (only safe with ONE LSS node on bus)");
-                    ok = lssMaster.configureGlobal(newNodeId, baud, true, baud != 0);
+                    dunkerUi.setLssStatus("Node-ID via 0x2000 gesendet - Geraet Power-Cyclen.", true);
                 }
-                dunkerUi.setLssStatus(ok ? "LSS gesendet - Geraet pruefen / Power-Cycle"
-                                         : "LSS fehlgeschlagen (keine Antwort)", ok);
             };
             dunkerUi.setCallbacks(dcbs);
             dunkerUi.create(selectedNodeId);

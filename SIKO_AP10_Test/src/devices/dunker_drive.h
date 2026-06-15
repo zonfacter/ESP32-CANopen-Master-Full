@@ -189,6 +189,29 @@ public:
     void halt() { cmdHalt(); }
 
     // -----------------------------------------------------------------------
+    // Dunker manufacturer config via SDO 0x2000 (per BG manual; LSS is not
+    // supported by this drive). Sequence: unlock key, then the value.
+    //   0x2000:01 = 0x6E657277 ("wren" = write enable)
+    //   0x2000:02 = new node-id
+    // -----------------------------------------------------------------------
+    static constexpr uint32_t DUNKER_WREN = 0x6E657277UL;
+
+    void cfgNodeIdSdo(uint8_t newNodeId) {
+        Serial.printf("[DUNKER] Node %u: set node-id via 0x2000 -> %u\n",
+                      (unsigned)m_nodeId, (unsigned)newNodeId);
+        qPush(0x2000, 0x01, DUNKER_WREN, 4);   // write enable
+        qPush(0x2000, 0x02, newNodeId, 1);     // new node-id
+    }
+
+    // Baudrate via 0x2000 (subindex per manual). baudIndex: 0=1M..8=10k.
+    void cfgBaudSdo(uint8_t baudIndex, uint8_t sub) {
+        Serial.printf("[DUNKER] Node %u: set baud index %u via 0x2000:%u\n",
+                      (unsigned)m_nodeId, (unsigned)baudIndex, (unsigned)sub);
+        qPush(0x2000, 0x01, DUNKER_WREN, 4);
+        qPush(0x2000, sub,  baudIndex,   1);
+    }
+
+    // -----------------------------------------------------------------------
     // M6: digital I/O + brake
     // -----------------------------------------------------------------------
     // Set/clear one physical output bit (0x60FE:01). Read-modify-write on the
