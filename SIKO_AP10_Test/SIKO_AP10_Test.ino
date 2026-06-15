@@ -28,6 +28,7 @@ using namespace esp_panel::board;
 // Universal master state machine
 #include "src/canopen/canopen_master_controller.h"
 #include "src/canopen/sdo_client.h"
+#include "src/canopen/lss_master.h"
 
 // CAN driver (loopback-capable variant)
 #include "src/canopen/canopen_driver.h"
@@ -89,6 +90,9 @@ static AP10_UI ap04Ui; // reuse the existing AP10/AP04 UI page as AP04 page
 static CanopenMasterController master(&canDriver);
 
 static uint8_t selectedNodeId = 0;
+
+// LSS master (CiA 305) for Node-ID / baudrate configuration
+static LssMaster lssMaster(&canDriver);
 
 // Dunker DS402 page (node-independent; bound to the selected node on connect)
 static DunkerUI    dunkerUi;
@@ -168,6 +172,9 @@ static void onCanFrame(uint32_t cobId, const uint8_t* data, uint8_t length)
 
     // Standard node-detail SDO client (1018h/1001h on-demand reads)
     stdSdo.processFrame(cobId, data, length);
+
+    // LSS master responses (0x7E4)
+    lssMaster.processFrame(cobId, data, length);
 
     // Ping scan detect: any SDO response in 0x581..0x5A0 marks node found
     if (pingScanRunning && cobId >= 0x581 && cobId <= 0x5A0) {
@@ -473,6 +480,8 @@ void setup()
 
     master.begin(Config::CAN_TX_PIN, Config::CAN_RX_PIN, Config::CAN_DEFAULT_BAUDRATE);
     master.setRxCallback(onCanFrame);
+
+    lssMaster.begin();
 
     // Track initial applied state for the centralized re-init path
     canReinitBaud = Config::CAN_DEFAULT_BAUDRATE;
@@ -1067,6 +1076,23 @@ void loop()
             // M6: I/O + brake
             dcbs.onSetOutput = [](uint8_t bit, bool on){ if (dunkerDev) dunkerDev->setOutputBit(bit, on); };
             dcbs.onBrake     = [](bool release){ if (dunkerDev) dunkerDev->setBrake(release); };
+            // Cfg: LSS node-id / baud (selective if the full LSS address incl. serial
+            // is known, else global -- which only safe with a single LSS node on bus)
+            dcbs.onLssApply  = [](uint8_t newNodeId, uint32_t baud){
+                const auto& dn = master.node(selectedNodeId);
+                bool ok;
+                if (dn.serial != 0) {
+                    Serial.printf("[LSS] Selective cfg node %u -> id=%u baud=%lu\n",
+                                  (unsigned)selectedNodeId, (unsigned)newNodeId, (unsigned long)baud);
+                    ok = lssMaster.configureSelective(dn.vendorId, dn.productCode, dn.revision,
+                                                      dn.serial, newNodeId, baud, true, baud != 0);
+                } else {
+                    Serial.println("[LSS] No serial in identity -> GLOBAL cfg (only safe with ONE LSS node on bus)");
+                    ok = lssMaster.configureGlobal(newNodeId, baud, true, baud != 0);
+                }
+                dunkerUi.setLssStatus(ok ? "LSS gesendet - Geraet pruefen / Power-Cycle"
+                                         : "LSS fehlgeschlagen (keine Antwort)", ok);
+            };
             dunkerUi.setCallbacks(dcbs);
             dunkerUi.create(selectedNodeId);
             dunkerUi.load();

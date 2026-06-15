@@ -37,6 +37,7 @@ struct Dunker_Callbacks {
     std::function<void(int, uint32_t)>     onJog       = nullptr; // M5 (dir, speed)
     std::function<void(uint8_t, bool)>     onSetOutput = nullptr; // M6 (bit, on)
     std::function<void(bool)>              onBrake     = nullptr; // M6 (release)
+    std::function<void(uint8_t, uint32_t)> onLssApply  = nullptr; // Cfg (new node-id, baud; baud 0 = keep)
 };
 
 class DunkerUI {
@@ -89,12 +90,23 @@ public:
         lv_obj_t* tabDs   = lv_tabview_add_tab(tv, "DS402");
         lv_obj_t* tabMot  = lv_tabview_add_tab(tv, "Motion");
         lv_obj_t* tabIo   = lv_tabview_add_tab(tv, "I/O");
+        lv_obj_t* tabCfg  = lv_tabview_add_tab(tv, "Cfg");
+
+        m_cfgNodeId = nodeId;   // default target = current node
 
         buildDs402Tab(tabDs);
         buildMotionTab(tabMot);
         buildIoTab(tabIo);
+        buildCfgTab(tabCfg);
 
         s_inst = this;
+    }
+
+    // Called by the app after an LSS apply to show the result.
+    void setLssStatus(const char* text, bool ok) {
+        if (!m_lblLssStatus) return;
+        lv_label_set_text(m_lblLssStatus, text);
+        lv_obj_set_style_text_color(m_lblLssStatus, lv_color_hex(ok ? 0x33DD66 : 0xFF4444), 0);
     }
 
     void load() {
@@ -260,6 +272,47 @@ private:
         m_lblBrake = mkLabel(t, "Bremse: ---", 8, 246, 0x8888AA, &lv_font_montserrat_14);
     }
 
+    void buildCfgTab(lv_obj_t* t) {
+        mkLabel(t, "LSS Node-ID / Baud (CiA 305)", 8, 8, 0xFFFFFF, &lv_font_montserrat_18);
+
+        // Node-ID stepper (-/+), no keyboard needed
+        mkLabel(t, "Node-ID:", 8, 60, 0xCCCCCC, &lv_font_montserrat_14);
+        mkBtn(t, "-", 0x555577, 110, 48, 64, 56, DunkerUI::onCfgNodeMinus);
+        m_lblCfgNode = mkLabel(t, "1", 198, 58, 0xFFBB33, &lv_font_montserrat_24);
+        mkBtn(t, "+", 0x555577, 258, 48, 64, 56, DunkerUI::onCfgNodePlus);
+
+        // Target baud (toggle; none selected = keep current baud)
+        mkLabel(t, "Baud:", 8, 128, 0xCCCCCC, &lv_font_montserrat_14);
+        m_btnCfgB125 = mkBtn(t, "125k", 0x444444, 110, 120, 90, 44, DunkerUI::onCfgBaud125);
+        m_btnCfgB250 = mkBtn(t, "250k", 0x444444, 208, 120, 90, 44, DunkerUI::onCfgBaud250);
+        m_btnCfgB500 = mkBtn(t, "500k", 0x444444, 306, 120, 90, 44, DunkerUI::onCfgBaud500);
+        mkLabel(t, "(keiner = Baud unveraendert)", 410, 130, 0x8888AA, &lv_font_montserrat_14);
+
+        mkBtn(t, "APPLY (LSS)", 0x007744, 8, 178, 220, 56, DunkerUI::onCfgApply);
+
+        mkLabel(t,
+            "WARNUNG: LSS-Global wirkt auf ALLE LSS-Knoten. Selective braucht die\n"
+            "volle LSS-Adresse inkl. Serial. Im Zweifel nur EIN Geraet am Bus.",
+            250, 186, 0xFF6666, &lv_font_montserrat_14);
+
+        m_lblLssStatus = mkLabel(t, "Status: ---", 8, 250, 0xAAAAAA, &lv_font_montserrat_14);
+
+        refreshCfgLabels();
+    }
+
+    void refreshCfgLabels() {
+        if (m_lblCfgNode) {
+            char b[8]; snprintf(b, sizeof(b), "%u", (unsigned)m_cfgNodeId);
+            lv_label_set_text(m_lblCfgNode, b);
+        }
+        auto hl = [](lv_obj_t* btn, bool sel) {
+            if (btn) lv_obj_set_style_bg_color(btn, lv_color_hex(sel ? 0x007744 : 0x444444), 0);
+        };
+        hl(m_btnCfgB125, m_cfgBaud == 125000);
+        hl(m_btnCfgB250, m_cfgBaud == 250000);
+        hl(m_btnCfgB500, m_cfgBaud == 500000);
+    }
+
     // ---------------- Widget helpers ----------------
     lv_obj_t* mkLabel(lv_obj_t* parent, const char* txt, int x, int y, uint32_t color, const lv_font_t* font) {
         lv_obj_t* l = lv_label_create(parent);
@@ -348,6 +401,17 @@ private:
     static void onBrakeReleaseClicked(lv_event_t*) { if (s_inst && s_inst->m_cbs.onBrake) s_inst->m_cbs.onBrake(true); }
     static void onBrakeEngageClicked(lv_event_t*)  { if (s_inst && s_inst->m_cbs.onBrake) s_inst->m_cbs.onBrake(false); }
 
+    // Cfg tab (LSS)
+    static void onCfgNodeMinus(lv_event_t*) { if (!s_inst) return; if (s_inst->m_cfgNodeId > 1)   s_inst->m_cfgNodeId--; s_inst->refreshCfgLabels(); }
+    static void onCfgNodePlus(lv_event_t*)  { if (!s_inst) return; if (s_inst->m_cfgNodeId < 127) s_inst->m_cfgNodeId++; s_inst->refreshCfgLabels(); }
+    static void cfgSetBaud(uint32_t b)      { if (!s_inst) return; s_inst->m_cfgBaud = (s_inst->m_cfgBaud == b) ? 0 : b; s_inst->refreshCfgLabels(); }
+    static void onCfgBaud125(lv_event_t*)   { cfgSetBaud(125000); }
+    static void onCfgBaud250(lv_event_t*)   { cfgSetBaud(250000); }
+    static void onCfgBaud500(lv_event_t*)   { cfgSetBaud(500000); }
+    static void onCfgApply(lv_event_t*) {
+        if (s_inst && s_inst->m_cbs.onLssApply) s_inst->m_cbs.onLssApply(s_inst->m_cfgNodeId, s_inst->m_cfgBaud);
+    }
+
     // Keyboard show/hide with iPhone-style content scrolling.
     static void onTaFocused(lv_event_t* ev) {
         if (!s_inst || !s_inst->m_kb) return;
@@ -399,6 +463,15 @@ private:
     lv_obj_t* m_lblBrake = nullptr;
     lv_obj_t* m_outBtn[4] = { nullptr, nullptr, nullptr, nullptr };
     bool      m_outState[4] = { false, false, false, false };
+
+    // Cfg tab (LSS)
+    uint8_t   m_cfgNodeId = 1;
+    uint32_t  m_cfgBaud = 0;          // 0 = keep current baud
+    lv_obj_t* m_lblCfgNode = nullptr;
+    lv_obj_t* m_btnCfgB125 = nullptr;
+    lv_obj_t* m_btnCfgB250 = nullptr;
+    lv_obj_t* m_btnCfgB500 = nullptr;
+    lv_obj_t* m_lblLssStatus = nullptr;
 
     inline static DunkerUI* s_inst = nullptr;
 };
