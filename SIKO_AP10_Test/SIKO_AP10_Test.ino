@@ -1140,17 +1140,28 @@ void loop()
             //   0x2000:01 unlock, :02 baud index, :03 node-id
             dcbs.onLssApply  = [](uint8_t newNodeId, uint32_t baud){
                 if (!dunkerDev) return;
-                dunkerDev->cfgNodeIdSdo(newNodeId);   // 0x2000:03
+                // IMPORTANT ordering: write baud FIRST (device still reachable at
+                // the current node-id), then node-id LAST -- changing the node-id
+                // moves the device's SDO address, so anything after it would target
+                // the wrong address. Node-id is only sent if it actually changes;
+                // its SDO write then "times out" (the drive re-addresses itself),
+                // which is expected, not a failure.
+                bool baudOk = true, sentBaud = false, sentId = false;
                 if (baud != 0) {
                     uint8_t idx = 0;
-                    if (LssMaster::baudrateToTableSel(baud, idx)) {
-                        dunkerDev->cfgBaudSdo(idx);   // 0x2000:02
-                        dunkerUi.setLssStatus("Node-ID + Baud via 0x2000 gesendet - Power-Cyclen.", true);
-                    } else {
-                        dunkerUi.setLssStatus("Node-ID gesendet; diese Baud nicht in der Tabelle.", true);
-                    }
+                    if (LssMaster::baudrateToTableSel(baud, idx)) { dunkerDev->cfgBaudSdo(idx); sentBaud = true; }
+                    else baudOk = false;
+                }
+                if (newNodeId != selectedNodeId) { dunkerDev->cfgNodeIdSdo(newNodeId); sentId = true; }
+
+                if (!baudOk) {
+                    dunkerUi.setLssStatus("Baud nicht in der Tabelle.", false);
+                } else if (sentId) {
+                    dunkerUi.setLssStatus("0x2000 gesendet - Power-Cyclen (Node-ID-Timeout ist normal).", true);
+                } else if (sentBaud) {
+                    dunkerUi.setLssStatus("Baud via 0x2000:02 gesendet - Power-Cyclen.", true);
                 } else {
-                    dunkerUi.setLssStatus("Node-ID via 0x2000:03 gesendet - Power-Cyclen.", true);
+                    dunkerUi.setLssStatus("Keine Aenderung (Node-ID/Baud unveraendert).", true);
                 }
             };
             dunkerUi.setCallbacks(dcbs);
