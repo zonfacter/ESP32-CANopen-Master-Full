@@ -1105,6 +1105,7 @@ void loop()
 
             lvgl_port_lock(-1);
 
+            if (!dunkerUi.created()) {
             Dunker_Callbacks dcbs;
             dcbs.onBack = [](){
                 Serial.println("[UI] Dunker: back to main");
@@ -1154,6 +1155,11 @@ void loop()
             };
             dunkerUi.setCallbacks(dcbs);
             dunkerUi.create(selectedNodeId);
+            } else {
+                // Page already built once -> just rebind to this node (avoids
+                // leaking a whole LVGL screen on every connect -> eventual OOM).
+                dunkerUi.setNode(selectedNodeId);
+            }
             dunkerUi.load();
 
             dunkerUiIsActive = true;   // activate RX processing only after full setup

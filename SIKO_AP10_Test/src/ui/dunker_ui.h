@@ -62,13 +62,13 @@ public:
         lv_obj_set_style_radius(hdr, 0, 0);
         lv_obj_clear_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
 
-        lv_obj_t* title = lv_label_create(hdr);
+        m_lblTitle = lv_label_create(hdr);
         char tbuf[48];
         snprintf(tbuf, sizeof(tbuf), "Dunker DS402 - Node %u", (unsigned)nodeId);
-        lv_label_set_text(title, tbuf);
-        lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
-        lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
-        lv_obj_align(title, LV_ALIGN_LEFT_MID, 15, 0);
+        lv_label_set_text(m_lblTitle, tbuf);
+        lv_obj_set_style_text_color(m_lblTitle, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(m_lblTitle, &lv_font_montserrat_20, 0);
+        lv_obj_align(m_lblTitle, LV_ALIGN_LEFT_MID, 15, 0);
 
         lv_obj_t* btnBack = lv_btn_create(hdr);
         lv_obj_set_size(btnBack, 110, 38);
@@ -111,6 +111,20 @@ public:
 
     void load() {
         if (m_screen) lv_scr_load_anim(m_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
+    }
+
+    bool created() const { return m_screen != nullptr; }
+
+    // Rebind the (already created) page to another node without recreating it.
+    void setNode(uint8_t nodeId) {
+        m_nodeId = nodeId;
+        m_cfgNodeId = nodeId;
+        if (m_lblTitle) {
+            char tbuf[48];
+            snprintf(tbuf, sizeof(tbuf), "Dunker DS402 - Node %u", (unsigned)nodeId);
+            lv_label_set_text(m_lblTitle, tbuf);
+        }
+        refreshCfgLabels();
     }
 
     void update(const DunkerData& d) {
@@ -442,6 +456,7 @@ private:
     uint8_t m_nodeId = 0;
 
     lv_obj_t* m_screen = nullptr;
+    lv_obj_t* m_lblTitle = nullptr;
     lv_obj_t* m_motCont = nullptr;
 
     // DS402 tab

@@ -141,8 +141,10 @@ public:
             m_knownType = KnownDeviceType::Unknown;
             m_initStage = OnlineInitStage::None;
             m_initDueMs = 0;
-            delete m_nmt; m_nmt = nullptr;
-            delete m_sdo; m_sdo = nullptr;
+            // IMPORTANT: do NOT delete m_nmt/m_sdo here. The CAN RX task may be
+            // inside onFrame() dereferencing them; freeing races -> use-after-free
+            // crash (Guru Meditation). They are reused on the next connect; the
+            // mode guard in onFrame() prevents use while offline.
         }
     }
 
@@ -460,11 +462,13 @@ public:
         // Otherwise we start as Unknown and identify via SDO.
         m_knownType = known;
 
-        delete m_nmt; m_nmt = nullptr;
-        delete m_sdo; m_sdo = nullptr;
-
-        m_nmt = new NmtManager(m_drv, nodeId);
-        m_sdo = new SdoClient(m_drv, nodeId);
+        // Reuse the NMT/SDO objects instead of delete+new: the RX task may be
+        // using them concurrently, and freeing them races -> crash. Allocate
+        // once (lazily), then just re-point them at the new node-id.
+        if (!m_nmt) m_nmt = new NmtManager(m_drv, nodeId);
+        else        m_nmt->setNodeId(nodeId);
+        if (!m_sdo) m_sdo = new SdoClient(m_drv, nodeId);
+        else        m_sdo->setNodeId(nodeId);
         if (m_sdo) m_sdo->setTimeout(800);
 
         // Start in Standard unless we already know it's a known device.
