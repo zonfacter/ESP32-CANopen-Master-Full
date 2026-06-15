@@ -197,19 +197,25 @@ public:
     // -----------------------------------------------------------------------
     static constexpr uint32_t DUNKER_WREN = 0x6E657277UL;
 
+    // NOTE: :02/:03 are written as UNSIGNED32 (4 bytes). Writing 1 byte was
+    // rejected with abort 0x06070010 ("data type does not match"); the object's
+    // subindices match the U32 unlock key. If a drive still aborts 0x06070010,
+    // change DUNKER_CFG_SIZE to 2 (U16).
+    static constexpr uint8_t DUNKER_CFG_SIZE = 4;
+
     void cfgNodeIdSdo(uint8_t newNodeId) {
         Serial.printf("[DUNKER] Node %u: set node-id via 0x2000:03 -> %u\n",
                       (unsigned)m_nodeId, (unsigned)newNodeId);
-        qPush(0x2000, 0x01, DUNKER_WREN, 4);   // unlock
-        qPush(0x2000, 0x03, newNodeId, 1);     // node-id (subindex 3)
+        qPush(0x2000, 0x01, DUNKER_WREN, 4);                 // unlock (U32)
+        qPush(0x2000, 0x03, newNodeId, DUNKER_CFG_SIZE);     // node-id (subindex 3)
     }
 
     // baudIndex: 0=1M, 1=800k, 2=500k, 3=250k, 4=125k, 5=100k, 6=50k, 7=20k, 8=10k
     void cfgBaudSdo(uint8_t baudIndex) {
         Serial.printf("[DUNKER] Node %u: set baud index %u via 0x2000:02\n",
                       (unsigned)m_nodeId, (unsigned)baudIndex);
-        qPush(0x2000, 0x01, DUNKER_WREN, 4);   // unlock
-        qPush(0x2000, 0x02, baudIndex, 1);     // baudrate (subindex 2)
+        qPush(0x2000, 0x01, DUNKER_WREN, 4);                 // unlock (U32)
+        qPush(0x2000, 0x02, baudIndex, DUNKER_CFG_SIZE);     // baudrate (subindex 2)
     }
 
     // -----------------------------------------------------------------------
