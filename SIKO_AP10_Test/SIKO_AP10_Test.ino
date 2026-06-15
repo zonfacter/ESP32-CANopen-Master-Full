@@ -1125,17 +1125,22 @@ void loop()
             // M6: I/O + brake
             dcbs.onSetOutput = [](uint8_t bit, bool on){ if (dunkerDev) dunkerDev->setOutputBit(bit, on); };
             dcbs.onBrake     = [](bool release){ if (dunkerDev) dunkerDev->setBrake(release); };
-            // Cfg: Dunker node-id via manufacturer SDO 0x2000 (LSS is not supported
-            // by this drive -- confirmed on hardware). Baud is intentionally NOT sent
-            // yet: the BG manual lists subindex 2 for BOTH node-id and baud, which is
-            // contradictory, so the baud subindex must be confirmed first.
+            // Cfg: Dunker node-id/baud via manufacturer SDO 0x2000 (LSS is not
+            // supported by this drive -- confirmed on hardware).
+            //   0x2000:01 unlock, :02 baud index, :03 node-id
             dcbs.onLssApply  = [](uint8_t newNodeId, uint32_t baud){
                 if (!dunkerDev) return;
-                dunkerDev->cfgNodeIdSdo(newNodeId);
+                dunkerDev->cfgNodeIdSdo(newNodeId);   // 0x2000:03
                 if (baud != 0) {
-                    dunkerUi.setLssStatus("Node-ID 0x2000 gesendet. Baud: Subindex offen (Handbuch).", true);
+                    uint8_t idx = 0;
+                    if (LssMaster::baudrateToTableSel(baud, idx)) {
+                        dunkerDev->cfgBaudSdo(idx);   // 0x2000:02
+                        dunkerUi.setLssStatus("Node-ID + Baud via 0x2000 gesendet - Power-Cyclen.", true);
+                    } else {
+                        dunkerUi.setLssStatus("Node-ID gesendet; diese Baud nicht in der Tabelle.", true);
+                    }
                 } else {
-                    dunkerUi.setLssStatus("Node-ID via 0x2000 gesendet - Geraet Power-Cyclen.", true);
+                    dunkerUi.setLssStatus("Node-ID via 0x2000:03 gesendet - Power-Cyclen.", true);
                 }
             };
             dunkerUi.setCallbacks(dcbs);

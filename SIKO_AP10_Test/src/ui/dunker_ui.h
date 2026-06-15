@@ -291,8 +291,8 @@ private:
         mkBtn(t, "APPLY (LSS)", 0x007744, 8, 178, 220, 56, DunkerUI::onCfgApply);
 
         mkLabel(t,
-            "Dunker: Node-ID via SDO 0x2000 (danach Power-Cycle).\n"
-            "Baud-Subindex noch offen - erst Handbuch bestaetigen.",
+            "Dunker: Node-ID (0x2000:03) + Baud (0x2000:02) via SDO.\n"
+            "Nach dem Senden Geraet power-cyclen.",
             250, 186, 0xFFBB33, &lv_font_montserrat_14);
 
         m_lblLssStatus = mkLabel(t, "Status: ---", 8, 250, 0xAAAAAA, &lv_font_montserrat_14);

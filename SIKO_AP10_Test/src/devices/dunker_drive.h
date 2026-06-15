@@ -190,25 +190,26 @@ public:
 
     // -----------------------------------------------------------------------
     // Dunker manufacturer config via SDO 0x2000 (per BG manual; LSS is not
-    // supported by this drive). Sequence: unlock key, then the value.
-    //   0x2000:01 = 0x6E657277 ("wren" = write enable)
-    //   0x2000:02 = new node-id
+    // supported by this drive). Each write is preceded by the unlock key.
+    //   0x2000:01 = 0x6E657277  (Freischaltung / write enable)
+    //   0x2000:02 = baudrate index (0=1M..8=10k)
+    //   0x2000:03 = node-id
     // -----------------------------------------------------------------------
     static constexpr uint32_t DUNKER_WREN = 0x6E657277UL;
 
     void cfgNodeIdSdo(uint8_t newNodeId) {
-        Serial.printf("[DUNKER] Node %u: set node-id via 0x2000 -> %u\n",
+        Serial.printf("[DUNKER] Node %u: set node-id via 0x2000:03 -> %u\n",
                       (unsigned)m_nodeId, (unsigned)newNodeId);
-        qPush(0x2000, 0x01, DUNKER_WREN, 4);   // write enable
-        qPush(0x2000, 0x02, newNodeId, 1);     // new node-id
+        qPush(0x2000, 0x01, DUNKER_WREN, 4);   // unlock
+        qPush(0x2000, 0x03, newNodeId, 1);     // node-id (subindex 3)
     }
 
-    // Baudrate via 0x2000 (subindex per manual). baudIndex: 0=1M..8=10k.
-    void cfgBaudSdo(uint8_t baudIndex, uint8_t sub) {
-        Serial.printf("[DUNKER] Node %u: set baud index %u via 0x2000:%u\n",
-                      (unsigned)m_nodeId, (unsigned)baudIndex, (unsigned)sub);
-        qPush(0x2000, 0x01, DUNKER_WREN, 4);
-        qPush(0x2000, sub,  baudIndex,   1);
+    // baudIndex: 0=1M, 1=800k, 2=500k, 3=250k, 4=125k, 5=100k, 6=50k, 7=20k, 8=10k
+    void cfgBaudSdo(uint8_t baudIndex) {
+        Serial.printf("[DUNKER] Node %u: set baud index %u via 0x2000:02\n",
+                      (unsigned)m_nodeId, (unsigned)baudIndex);
+        qPush(0x2000, 0x01, DUNKER_WREN, 4);   // unlock
+        qPush(0x2000, 0x02, baudIndex, 1);     // baudrate (subindex 2)
     }
 
     // -----------------------------------------------------------------------
