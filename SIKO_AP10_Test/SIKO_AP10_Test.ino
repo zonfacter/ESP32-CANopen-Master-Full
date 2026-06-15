@@ -195,11 +195,18 @@ static void onCanFrame(uint32_t cobId, const uint8_t* data, uint8_t length)
         }
     }
 
-    // Active auto-scan detect: any SDO response (0x581..0x5FF) means a node is
-    // alive at the current baud (passive heartbeat detection still works too).
-    if (scanRunning && cobId >= 0x581 && cobId <= 0x5FF) {
-        const uint8_t nid = (uint8_t)(cobId - 0x580);
-        if (nid >= 1 && nid <= 127) {
+    // Active auto-scan detect: accept ONLY a well-formed SDO response to our
+    // 0x1000 ping (valid SDO command byte + index 0x1000). The previous "any
+    // COB-ID in 0x581..0x5FF" check could lock onto a wrong baud from a stray
+    // frame; requiring the exact response content makes the lock reliable.
+    if (scanRunning && cobId >= 0x581 && cobId <= 0x5A0 && data && length >= 4) {
+        const uint8_t  cmd = data[0];
+        const uint16_t idx = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
+        const bool validSdoResp = (idx == 0x1000) &&
+            (cmd == 0x43 || cmd == 0x4F || cmd == 0x4B || cmd == 0x47 ||
+             cmd == 0x80 || cmd == 0x60);  // read-resp / abort / write-ack
+        if (validSdoResp) {
+            const uint8_t nid = (uint8_t)(cobId - 0x580);
             auto& dn = master.node(nid);
             if (!dn.seen) {
                 Serial.printf("[SCAN] Node %u antwortet @ %lu bps\n",
@@ -1137,7 +1144,7 @@ void loop()
             dcbs.onBrake     = [](bool release){ if (dunkerDev) dunkerDev->setBrake(release); };
             // Cfg: Dunker node-id/baud via manufacturer SDO 0x2000 (LSS is not
             // supported by this drive -- confirmed on hardware).
-            //   0x2000:01 unlock, :02 baud index, :03 node-id
+            //   0x2000:01 unlock, :02 node-id, :03 baud index (verified on hardware)
             dcbs.onLssApply  = [](uint8_t newNodeId, uint32_t baud){
                 if (!dunkerDev) return;
                 // IMPORTANT ordering: write baud FIRST (device still reachable at

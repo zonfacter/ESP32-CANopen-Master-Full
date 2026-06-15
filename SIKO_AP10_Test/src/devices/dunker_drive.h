@@ -189,33 +189,30 @@ public:
     void halt() { cmdHalt(); }
 
     // -----------------------------------------------------------------------
-    // Dunker manufacturer config via SDO 0x2000 (per BG manual; LSS is not
-    // supported by this drive). Each write is preceded by the unlock key.
+    // Dunker manufacturer config via SDO 0x2000. Subindices verified on real
+    // hardware (the BG manual excerpt had :02/:03 the other way round):
     //   0x2000:01 = 0x6E657277  (Freischaltung / write enable)
-    //   0x2000:02 = baudrate index (0=1M..8=10k)
-    //   0x2000:03 = node-id
+    //   0x2000:02 = node-id
+    //   0x2000:03 = baudrate index (0=1M..8=10k)
     // -----------------------------------------------------------------------
     static constexpr uint32_t DUNKER_WREN = 0x6E657277UL;
 
-    // NOTE: :02/:03 are written as UNSIGNED32 (4 bytes). Writing 1 byte was
-    // rejected with abort 0x06070010 ("data type does not match"); the object's
-    // subindices match the U32 unlock key. If a drive still aborts 0x06070010,
-    // change DUNKER_CFG_SIZE to 2 (U16).
+    // :02/:03 are UNSIGNED32 (1 byte was rejected with abort 0x06070010).
     static constexpr uint8_t DUNKER_CFG_SIZE = 4;
 
     void cfgNodeIdSdo(uint8_t newNodeId) {
-        Serial.printf("[DUNKER] Node %u: set node-id via 0x2000:03 -> %u\n",
+        Serial.printf("[DUNKER] Node %u: set node-id via 0x2000:02 -> %u\n",
                       (unsigned)m_nodeId, (unsigned)newNodeId);
         qPush(0x2000, 0x01, DUNKER_WREN, 4);                 // unlock (U32)
-        qPush(0x2000, 0x03, newNodeId, DUNKER_CFG_SIZE);     // node-id (subindex 3)
+        qPush(0x2000, 0x02, newNodeId, DUNKER_CFG_SIZE);     // node-id (subindex 2)
     }
 
     // baudIndex: 0=1M, 1=800k, 2=500k, 3=250k, 4=125k, 5=100k, 6=50k, 7=20k, 8=10k
     void cfgBaudSdo(uint8_t baudIndex) {
-        Serial.printf("[DUNKER] Node %u: set baud index %u via 0x2000:02\n",
+        Serial.printf("[DUNKER] Node %u: set baud index %u via 0x2000:03\n",
                       (unsigned)m_nodeId, (unsigned)baudIndex);
         qPush(0x2000, 0x01, DUNKER_WREN, 4);                 // unlock (U32)
-        qPush(0x2000, 0x02, baudIndex, DUNKER_CFG_SIZE);     // baudrate (subindex 2)
+        qPush(0x2000, 0x03, baudIndex, DUNKER_CFG_SIZE);     // baudrate (subindex 3)
     }
 
     // -----------------------------------------------------------------------

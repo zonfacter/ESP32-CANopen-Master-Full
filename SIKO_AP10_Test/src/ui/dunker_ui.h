@@ -305,7 +305,7 @@ private:
         mkBtn(t, "APPLY (LSS)", 0x007744, 8, 178, 220, 56, DunkerUI::onCfgApply);
 
         mkLabel(t,
-            "Dunker: Node-ID (0x2000:03) + Baud (0x2000:02) via SDO.\n"
+            "Dunker: Node-ID (0x2000:02) + Baud (0x2000:03) via SDO.\n"
             "Nach dem Senden Geraet power-cyclen.",
             250, 186, 0xFFBB33, &lv_font_montserrat_14);
 
