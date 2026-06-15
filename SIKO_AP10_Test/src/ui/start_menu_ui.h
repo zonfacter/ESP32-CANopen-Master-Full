@@ -208,15 +208,35 @@ private:
         lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
         lv_obj_set_pos(hint, 530, 82);
 
+        // Live status line (scan / ping / identify feedback)
+        m_lblStatus = lv_label_create(m_screenStart);
+        lv_label_set_text(m_lblStatus, LV_SYMBOL_BELL "  Bereit.");
+        lv_obj_set_style_text_color(m_lblStatus, lv_color_hex(0x33DD66), 0);
+        lv_obj_set_style_text_font(m_lblStatus, &lv_font_montserrat_18, 0);
+        lv_obj_set_pos(m_lblStatus, 12, 150);
+        lv_label_set_long_mode(m_lblStatus, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(m_lblStatus, 776);
+
         // Node list
         m_list = lv_list_create(m_screenStart);
-        lv_obj_set_size(m_list, 780, 330);
-        lv_obj_set_pos(m_list, 10, 150);
+        lv_obj_set_size(m_list, 780, 296);
+        lv_obj_set_pos(m_list, 10, 182);
         lv_obj_set_style_bg_color(m_list, lv_color_hex(0x12122A), 0);
         lv_obj_set_style_border_color(m_list, lv_color_hex(0x0F3460), 0);
         lv_obj_set_style_border_width(m_list, 2, 0);
         lv_obj_set_style_radius(m_list, 12, 0);
     }
+
+public:
+    // Set the live status line (call under the LVGL lock). color: 0=info,1=ok,2=warn.
+    void setStatus(const char* text, uint8_t kind = 0) {
+        if (!m_lblStatus || !text) return;
+        const uint32_t col = (kind == 1) ? 0x33DD66 : (kind == 2) ? 0xFF6666 : 0xFFBB33;
+        lv_obj_set_style_text_color(m_lblStatus, lv_color_hex(col), 0);
+        lv_label_set_text(m_lblStatus, text);
+    }
+
+private:
 
     void createToolsScreen() {
         m_screenTools = lv_obj_create(nullptr);
@@ -386,6 +406,7 @@ private:
 
     // Start screen widgets
     lv_obj_t* m_list = nullptr;
+    lv_obj_t* m_lblStatus = nullptr;
 
     // Tools widgets
     lv_obj_t* m_btnSniffer = nullptr;

@@ -90,36 +90,6 @@ static inline KnownDeviceType classifyByIdentity(uint32_t vendorId, uint32_t pro
     return KnownDeviceType::Unknown;
 }
 
-// HEURISTIC, UNVERIFIED decoder for Dunker BG-series product codes.
-// Layout assumption (community-inferred from EDS files / installations,
-// NOT officially documented by Dunkermotoren): product-code = 0x00MMVVTT
-//   MM = motor series byte (0x22/0x32/0x45/0x65/0x75 = BG22..BG75)
-//   VV = mechanical variant (0x10 std, 0x20 encoder, 0x30 brake, 0x40 gear, 0x50 custom)
-//   TT = electronics (0x01..0x03 integrated, 0x10/0x20/0x30 = BGE5510/6010/6060)
-// IMPORTANT: For diagnostic display/logging ONLY. Never drive control logic from
-// this until the scheme is confirmed against real hardware product codes.
-static inline void dunkerDecodeHint(uint32_t productCode, char* out, size_t n) {
-    if (!out || n == 0) return;
-
-    const uint8_t mm = (uint8_t)((productCode >> 16) & 0xFF);
-    const uint8_t vv = (uint8_t)((productCode >> 8) & 0xFF);
-    const uint8_t tt = (uint8_t)(productCode & 0xFF);
-
-    const char* series =
-        (mm == 0x22) ? "BG22" : (mm == 0x32) ? "BG32" : (mm == 0x45) ? "BG45" :
-        (mm == 0x65) ? "BG65" : (mm == 0x75) ? "BG75" : "BG??";
-
-    const char* variant =
-        (vv == 0x10) ? "Standard" : (vv == 0x20) ? "Encoder" : (vv == 0x30) ? "Brake" :
-        (vv == 0x40) ? "Gear"     : (vv == 0x50) ? "Custom"  : "Variant?";
-
-    const char* elec =
-        (tt == 0x01) ? "IE-Std" : (tt == 0x02) ? "IE-CANopen" : (tt == 0x03) ? "IE-IO/PWM" :
-        (tt == 0x10) ? "BGE5510" : (tt == 0x20) ? "BGE6010"   : (tt == 0x30) ? "BGE6060" : "Elec?";
-
-    snprintf(out, n, "%s/%s/%s", series, variant, elec);
-}
-
 struct DiscoveredNode {
     bool     seen = false;
     uint8_t  nodeId = 0;

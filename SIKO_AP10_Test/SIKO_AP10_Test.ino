@@ -28,6 +28,7 @@ using namespace esp_panel::board;
 // Universal master state machine
 #include "src/canopen/canopen_master_controller.h"
 #include "src/canopen/sdo_client.h"
+#include "src/canopen/lss_master.h"
 
 // CAN driver (loopback-capable variant)
 #include "src/canopen/canopen_driver.h"
@@ -52,11 +53,15 @@ struct Config {
     static constexpr uint32_t UI_UPDATE_MS    = 200;
     static constexpr uint32_t STATUS_PRINT_MS = 5000;
 
-    static constexpr uint32_t SCAN_WINDOW_MS = 1200;
+    static constexpr uint32_t SCAN_WINDOW_MS = 1500;  // probe sweep (~1s) + response slack
 
-    static constexpr uint32_t SCAN_BAUDS[8] = {
-        1000000, 500000, 250000, 125000, 100000, 50000, 20000, 10000
+    // CANopen practical baudrates. 10k/20k are intentionally omitted: they need a
+    // large TWAI prescaler that some cores/SoCs don't expose, and CANopen devices
+    // virtually never run that slow.
+    static constexpr uint32_t SCAN_BAUDS[] = {
+        1000000, 500000, 250000, 125000, 100000, 50000
     };
+    static constexpr uint8_t SCAN_BAUD_COUNT = sizeof(SCAN_BAUDS) / sizeof(SCAN_BAUDS[0]);
 };
 
 // ============================================================================
@@ -85,6 +90,9 @@ static AP10_UI ap04Ui; // reuse the existing AP10/AP04 UI page as AP04 page
 static CanopenMasterController master(&canDriver);
 
 static uint8_t selectedNodeId = 0;
+
+// LSS master (CiA 305) for Node-ID / baudrate configuration
+static LssMaster lssMaster(&canDriver);
 
 // Dunker DS402 page (node-independent; bound to the selected node on connect)
 static DunkerUI    dunkerUi;
@@ -137,6 +145,14 @@ static uint8_t  scanBaudIdx = 0;
 static uint32_t scanStepStartMs = 0;
 static uint32_t activeBaud = Config::CAN_DEFAULT_BAUDRATE;
 
+// Active auto-scan probe: at each baud we actively send SDO reads (0x1000:00)
+// to nodes 1..32 and listen for responses, instead of only passively waiting
+// for spontaneous traffic (which misses devices that are quiet in the window).
+static uint8_t  scanProbeNode = 1;
+static uint32_t scanProbeLastMs = 0;
+static constexpr uint8_t  SCAN_PROBE_MAX_NODE = 32;
+static constexpr uint32_t SCAN_PROBE_INTERVAL_MS = 30;
+
 // ============================================================================
 // CAN RX Callback
 // ============================================================================
@@ -157,6 +173,9 @@ static void onCanFrame(uint32_t cobId, const uint8_t* data, uint8_t length)
     // Standard node-detail SDO client (1018h/1001h on-demand reads)
     stdSdo.processFrame(cobId, data, length);
 
+    // LSS master responses (0x7E4)
+    lssMaster.processFrame(cobId, data, length);
+
     // Ping scan detect: any SDO response in 0x581..0x5A0 marks node found
     if (pingScanRunning && cobId >= 0x581 && cobId <= 0x5A0) {
         const uint8_t nid = (uint8_t)(cobId - 0x580);
@@ -168,6 +187,21 @@ static void onCanFrame(uint32_t cobId, const uint8_t* data, uint8_t length)
             dn.seen = true;
             dn.lastSeenMs = millis();
             Serial.printf("[PING] Node %u responded (COB-ID=0x%03lX)\n", (unsigned)nid, (unsigned long)cobId);
+        }
+    }
+
+    // Active auto-scan detect: any SDO response (0x581..0x5FF) means a node is
+    // alive at the current baud (passive heartbeat detection still works too).
+    if (scanRunning && cobId >= 0x581 && cobId <= 0x5FF) {
+        const uint8_t nid = (uint8_t)(cobId - 0x580);
+        if (nid >= 1 && nid <= 127) {
+            auto& dn = master.node(nid);
+            if (!dn.seen) {
+                Serial.printf("[SCAN] Node %u antwortet @ %lu bps\n",
+                              (unsigned)nid, (unsigned long)activeBaud);
+            }
+            dn.seen = true;
+            dn.lastSeenMs = millis();
         }
     }
 
@@ -329,16 +363,41 @@ static void startAutoBaudScan()
     scanRunning = true;
     scanBaudIdx = 0;
     scanStepStartMs = millis();
+    scanProbeNode = 1;
+    scanProbeLastMs = 0;
 
     master.setMode(MasterMode::Scanning);
     master.resetDiscovery();
 
-    Serial.println("[SCAN] Auto-Baud Scan gestartet");
+    Serial.println("[SCAN] Auto-Baud Scan gestartet (aktiv: SDO-Ping 1..32 je Baud)");
+    startUi.setStatus(LV_SYMBOL_REFRESH "  Auto-Scan laeuft...", 0);  // called under LVGL lock (button cb)
 
     activeBaud = Config::SCAN_BAUDS[scanBaudIdx];
     Serial.printf("[SCAN] Set baud %lu\n", (unsigned long)activeBaud);
 
     requestCanReinit(activeBaud, loopbackEnabled);
+}
+
+// Active probe: while scanning, send one SDO read (0x1000:00) per interval,
+// cycling nodes 1..SCAN_PROBE_MAX_NODE. Responses are detected in onCanFrame.
+static void scanActiveProbe(uint32_t now)
+{
+    if (!scanRunning) return;
+    if (scanProbeNode > SCAN_PROBE_MAX_NODE) return;          // swept this baud
+    if (now - scanProbeLastMs < SCAN_PROBE_INTERVAL_MS) return;
+
+    // Safety: at a wrong baud our frames are never ACKed and the TX error counter
+    // climbs toward bus-off. Stop probing this baud once the bus is unhealthy;
+    // the next baud's re-init resets the controller anyway.
+    if (!canDriver.busHealthyForTx()) {
+        scanProbeNode = SCAN_PROBE_MAX_NODE + 1;              // stop sweeping this baud
+        return;
+    }
+
+    uint8_t sdo[8] = { 0x40, 0x00, 0x10, 0x00, 0, 0, 0, 0 };  // read 0x1000:00
+    canDriver.sendFrame(0x600 + scanProbeNode, sdo, 8);
+    scanProbeLastMs = now;
+    scanProbeNode++;
 }
 
 static void scanTick(uint32_t now)
@@ -354,7 +413,10 @@ static void scanTick(uint32_t now)
     if (anySeen) {
         Serial.printf("[SCAN] Treffer @ %lu bps\n", (unsigned long)activeBaud);
         scanRunning = false;
+        char st[64];
+        snprintf(st, sizeof(st), LV_SYMBOL_OK "  Treffer @ %lu kBit/s", (unsigned long)(activeBaud / 1000));
         lvgl_port_lock(-1);
+        startUi.setStatus(st, 1);
         refreshStartMenuList();
         lvgl_port_unlock();
         master.setMode(MasterMode::Idle);
@@ -362,17 +424,20 @@ static void scanTick(uint32_t now)
     }
 
     scanBaudIdx++;
-    if (scanBaudIdx >= 8) {
+    if (scanBaudIdx >= Config::SCAN_BAUD_COUNT) {
         Serial.println("[SCAN] Kein CANopen Traffic erkannt (alle Baudraten getestet)");
         scanRunning = false;
         master.setMode(MasterMode::Idle);
         lvgl_port_lock(-1);
+        startUi.setStatus(LV_SYMBOL_WARNING "  Kein CANopen-Traffic gefunden (alle Baudraten)", 2);
         refreshStartMenuList();
         lvgl_port_unlock();
         return;
     }
 
     scanStepStartMs = now;
+    scanProbeNode = 1;          // re-sweep nodes 1..32 at the new baud
+    scanProbeLastMs = now;
     activeBaud = Config::SCAN_BAUDS[scanBaudIdx];
     Serial.printf("[SCAN] Set baud %lu\n", (unsigned long)activeBaud);
 
@@ -420,6 +485,8 @@ void setup()
 
     master.begin(Config::CAN_TX_PIN, Config::CAN_RX_PIN, Config::CAN_DEFAULT_BAUDRATE);
     master.setRxCallback(onCanFrame);
+
+    lssMaster.begin();
 
     // Track initial applied state for the centralized re-init path
     canReinitBaud = Config::CAN_DEFAULT_BAUDRATE;
@@ -472,6 +539,7 @@ void setup()
         memset(pingScanFound, 0, sizeof(pingScanFound));
         pingScanBaudSnapshot = activeBaud;
         Serial.printf("[PING] Start SDO ping scan 1..32 @ %lu bps\n", (unsigned long)pingScanBaudSnapshot);
+        startUi.setStatus(LV_SYMBOL_REFRESH "  Ping-Scan 1..32 laeuft...", 0);  // button cb -> under LVGL lock
 
         // Helpful: ensure sniffer is ON so user sees traffic
         if (!snifferEnabled) {
@@ -490,10 +558,12 @@ void setup()
         }
         if (pingScanFoundCount == 0) {
             Serial.println("[IDENT] No nodes found (run PING SCAN first)");
+            startUi.setStatus(LV_SYMBOL_WARNING "  Identify: erst PING SCAN ausfuehren", 2);
             return;
         }
         if (activeBaud != pingScanBaudSnapshot) {
             Serial.println("[IDENT] Baud differs from last scan; please keep baud fixed");
+            startUi.setStatus(LV_SYMBOL_WARNING "  Identify: Baud seit Scan geaendert", 2);
             return;
         }
 
@@ -629,7 +699,8 @@ void loop()
 {
     const uint32_t now = millis();
 
-    // Scan state machine tick
+    // Scan state machine tick (+ active SDO probing per baud)
+    scanActiveProbe(now);
     scanTick(now);
 
     // Centralized CAN re-init handler (baud + loopback)
@@ -709,15 +780,21 @@ void loop()
                 if (doneDue == 0) doneDue = t + 250;
                 if ((int32_t)(t - doneDue) >= 0) {
                     Serial.printf("[PING] Done. Found %u nodes: ", (unsigned)pingScanFoundCount);
+                    char st[80];
+                    int p = snprintf(st, sizeof(st), LV_SYMBOL_OK "  Ping: %u Node(s):", (unsigned)pingScanFoundCount);
                     for (uint8_t i = 1; i <= 32; i++) {
-                        if (pingScanFound[i]) Serial.printf("%u ", (unsigned)i);
+                        if (pingScanFound[i]) {
+                            Serial.printf("%u ", (unsigned)i);
+                            if (p < (int)sizeof(st) - 4) p += snprintf(st + p, sizeof(st) - p, " %u", (unsigned)i);
+                        }
                     }
                     Serial.println();
                     pingScanRunning = false;
                     doneDue = 0;
 
-                    // Show freshly discovered nodes in the start-menu list
+                    // Show freshly discovered nodes in the start-menu list + status
                     lvgl_port_lock(-1);
+                    startUi.setStatus(st, pingScanFoundCount ? 1 : 2);
                     refreshStartMenuList();
                     lvgl_port_unlock();
                 }
@@ -797,17 +874,12 @@ void loop()
                               (unsigned long)dn.serial,
                               typeStr);
 
-                // Dunker: print a HEURISTIC (unverified) BG-series decode next to the
-                // raw product code, so the scheme can be validated on real hardware.
-                if (dn.known == KnownDeviceType::Dunker_75CI) {
-                    char hint[40];
-                    dunkerDecodeHint(dn.productCode, hint, sizeof(hint));
-                    Serial.printf("[IDENT-ALL] Node %u: Dunker BG-code hint (UNVERIFIED) = %s\n",
-                                  (unsigned)identifyAllNode, hint);
-                }
-
-                // Reflect the new classification in the list immediately
+                // Reflect the new classification in the list immediately + status
+                char ist[64];
+                snprintf(ist, sizeof(ist), LV_SYMBOL_EYE_OPEN "  Identify Node %u: %s",
+                         (unsigned)identifyAllNode, typeStr);
                 lvgl_port_lock(-1);
+                startUi.setStatus(ist, 0);
                 refreshStartMenuList();
                 lvgl_port_unlock();
 
@@ -823,6 +895,9 @@ void loop()
                 } else {
                     identifyAllRunning = false;
                     Serial.println("[IDENT-ALL] Done (all found nodes identified)");
+                    lvgl_port_lock(-1);
+                    startUi.setStatus(LV_SYMBOL_OK "  Identify fertig", 1);
+                    lvgl_port_unlock();
                 }
                 break;
             }
@@ -1022,6 +1097,23 @@ void loop()
             // M6: I/O + brake
             dcbs.onSetOutput = [](uint8_t bit, bool on){ if (dunkerDev) dunkerDev->setOutputBit(bit, on); };
             dcbs.onBrake     = [](bool release){ if (dunkerDev) dunkerDev->setBrake(release); };
+            // Cfg: LSS node-id / baud (selective if the full LSS address incl. serial
+            // is known, else global -- which only safe with a single LSS node on bus)
+            dcbs.onLssApply  = [](uint8_t newNodeId, uint32_t baud){
+                const auto& dn = master.node(selectedNodeId);
+                bool ok;
+                if (dn.serial != 0) {
+                    Serial.printf("[LSS] Selective cfg node %u -> id=%u baud=%lu\n",
+                                  (unsigned)selectedNodeId, (unsigned)newNodeId, (unsigned long)baud);
+                    ok = lssMaster.configureSelective(dn.vendorId, dn.productCode, dn.revision,
+                                                      dn.serial, newNodeId, baud, true, baud != 0);
+                } else {
+                    Serial.println("[LSS] No serial in identity -> GLOBAL cfg (only safe with ONE LSS node on bus)");
+                    ok = lssMaster.configureGlobal(newNodeId, baud, true, baud != 0);
+                }
+                dunkerUi.setLssStatus(ok ? "LSS gesendet - Geraet pruefen / Power-Cycle"
+                                         : "LSS fehlgeschlagen (keine Antwort)", ok);
+            };
             dunkerUi.setCallbacks(dcbs);
             dunkerUi.create(selectedNodeId);
             dunkerUi.load();

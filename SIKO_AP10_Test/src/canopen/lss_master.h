@@ -114,19 +114,76 @@ public:
         return m_lastError == 0;
     }
 
+    // ---- LSS Selective switch (CiA 305) ----
+    // Targets exactly ONE node by its LSS address (1018h vendor/product/rev/serial),
+    // so it is safe even with other LSS nodes on the bus.
+    static void put32(uint8_t* d, uint32_t v) {
+        d[1] = (uint8_t)(v & 0xFF);
+        d[2] = (uint8_t)((v >> 8) & 0xFF);
+        d[3] = (uint8_t)((v >> 16) & 0xFF);
+        d[4] = (uint8_t)((v >> 24) & 0xFF);
+    }
+    bool switchSelVendor(uint32_t v)   { uint8_t d[8]={0}; d[0]=0x40; put32(d,v); return tx(0x7E5,d,5); }
+    bool switchSelProduct(uint32_t v)  { uint8_t d[8]={0}; d[0]=0x41; put32(d,v); return tx(0x7E5,d,5); }
+    bool switchSelRevision(uint32_t v) { uint8_t d[8]={0}; d[0]=0x42; put32(d,v); return tx(0x7E5,d,5); }
+    bool switchSelSerial(uint32_t v)   { uint8_t d[8]={0}; d[0]=0x43; put32(d,v); return tx(0x7E5,d,5); }
+
+    // Selective switch to configuration state. Slave confirms with CS 0x44.
+    bool switchModeSelective(uint32_t vendor, uint32_t product, uint32_t revision,
+                             uint32_t serial, uint32_t timeoutMs = 300) {
+        switchSelVendor(vendor);   delay(5);
+        switchSelProduct(product); delay(5);
+        switchSelRevision(revision); delay(5);
+        m_hasResp = false;
+        switchSelSerial(serial);
+        return waitResponse(timeoutMs, 0x44);
+    }
+
+    // Configure ONE node selected by its LSS address: set node-id, optional
+    // bitrate, optional store. Leaves LSS in operation mode.
+    // Returns true if the selective switch + node-id write were sent OK.
+    bool configureSelective(uint32_t vendor, uint32_t product, uint32_t revision, uint32_t serial,
+                            uint8_t newNodeId, uint32_t newBaud, bool doStore, bool doActivate,
+                            uint32_t timeoutMs = 300) {
+        if (!switchModeSelective(vendor, product, revision, serial, timeoutMs)) {
+            Serial.println("[LSS] Selective switch: no/!ok response (device not in LSS init / no match)");
+            return false;
+        }
+        configureNodeId(newNodeId);
+        delay(10);
+
+        if (newBaud != 0) {
+            uint8_t sel = 0;
+            if (baudrateToTableSel(newBaud, sel)) {
+                configureBitTiming(sel);
+                delay(10);
+            }
+        }
+        if (doStore)    { storeConfiguration(); delay(10); }
+        if (doActivate) { activateBitTiming();  delay(10); }
+
+        switchModeGlobal(0);   // back to operation
+        Serial.printf("[LSS] Selective configure done: node-id=%u baud=%lu store=%d\n",
+                      (unsigned)newNodeId, (unsigned long)newBaud, (int)doStore);
+        return true;
+    }
+
     // Convenience: configure node-id + bitrate (global)
     // WARNING: Global mode switching affects all LSS-capable nodes.
     bool configureGlobal(uint8_t newNodeId, uint32_t newBaud, bool doStore, bool doActivate, uint32_t timeoutMs = 250) {
-        uint8_t sel = 0;
-        if (!baudrateToTableSel(newBaud, sel)) return false;
-
-        // Enter config
+        (void)timeoutMs;
+        // Enter config (global -> affects all LSS-capable nodes)
         if (!switchModeGlobal(1)) return false;
         delay(10);
 
-        // Set bitrate
-        configureBitTiming(sel);
-        delay(10);
+        // Optional bitrate (newBaud == 0 -> keep current baud, node-id only)
+        if (newBaud != 0) {
+            uint8_t sel = 0;
+            if (baudrateToTableSel(newBaud, sel)) {
+                configureBitTiming(sel);
+                delay(10);
+            }
+        }
 
         // Set node-id
         configureNodeId(newNodeId);
@@ -137,7 +194,7 @@ public:
             delay(10);
         }
 
-        if (doActivate) {
+        if (doActivate && newBaud != 0) {
             activateBitTiming();
             delay(10);
         }
