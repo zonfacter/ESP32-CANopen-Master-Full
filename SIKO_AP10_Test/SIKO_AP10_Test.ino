@@ -23,6 +23,7 @@ using namespace esp_panel::board;
 // UI
 #include "src/ui/start_menu_ui.h"
 #include "src/ui/node_detail_ui.h"
+#include "src/ui/monitor_ui.h"
 #include "src/ui/siko_ap_ui.h"
 
 // Universal master state machine
@@ -86,6 +87,9 @@ static uint32_t lastStatusPrint = 0;
 
 static StartMenuUI startUi;
 static NodeDetailUI nodeUi;
+static MonitorUI    monitorUi;
+static bool         monitorActive = false;
+static uint32_t     lastMonitorMs = 0;
 static AP10_UI ap04Ui; // reuse the existing AP10/AP04 UI page as AP04 page
 static CanopenMasterController master(&canDriver);
 
@@ -624,8 +628,32 @@ void setup()
         lvgl_port_unlock();
     };
 
+    cbs.onOpenMonitor = [](){
+        monitorActive = true;
+        if (!snifferEnabled) { snifferEnabled = true; sniffer.setEnabled(true); startUi.setSnifferEnabled(true); }
+        monitorUi.setSnifferUi(snifferEnabled);
+        monitorUi.load();
+        Serial.println("[UI] Monitor opened (sniffer auto-enabled)");
+    };
+
     startUi.setCallbacks(cbs);
     startUi.create();
+
+    // Live CAN monitor screen
+    Monitor_Callbacks mcbs;
+    mcbs.onBack = [](){
+        monitorActive = false;
+        lv_scr_load_anim(startUi.screen(), LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+    };
+    mcbs.onToggleSniffer = [](bool en){
+        snifferEnabled = en;
+        sniffer.setEnabled(en);
+        startUi.setSnifferEnabled(en);
+        Serial.printf("[MONITOR] Sniffer %s\n", en ? "ON" : "OFF");
+    };
+    mcbs.onClear = [](){ sniffer.clearRecent(); Serial.println("[MONITOR] cleared"); };
+    monitorUi.setCallbacks(mcbs);
+    monitorUi.create();
 
     // Node detail callbacks
     NodeDetail_Callbacks ncbs;
@@ -1136,6 +1164,38 @@ void loop()
             if (dunkerUiIsActive && dunkerDev) dunkerUi.update(dunkerDev->getData());
             lvgl_port_unlock();
         }
+    }
+
+    // Live monitor refresh (build a newest-first log from the sniffer buffer)
+    if (monitorActive && (now - lastMonitorMs >= 150)) {
+        lastMonitorMs = now;
+        std::vector<DecodedFrame> frames = sniffer.getRecentFramesCopy();
+
+        static char logbuf[2048];
+        size_t pos = 0;
+        logbuf[0] = 0;
+        int shown = 0;
+        for (int i = (int)frames.size() - 1; i >= 0 && shown < 28; --i, ++shown) {
+            const DecodedFrame& df = frames[(size_t)i];
+            int w = snprintf(logbuf + pos, sizeof(logbuf) - pos, "0x%03X %-8s N%-3u %u:",
+                             (unsigned)df.raw.id, df.type ? df.type : "",
+                             (unsigned)df.nodeId, (unsigned)df.raw.dlc);
+            if (w < 0 || pos + (size_t)w >= sizeof(logbuf)) break;
+            pos += (size_t)w;
+            for (uint8_t b = 0; b < df.raw.dlc && b < 8; ++b) {
+                w = snprintf(logbuf + pos, sizeof(logbuf) - pos, " %02X", df.raw.data[b]);
+                if (w < 0 || pos + (size_t)w >= sizeof(logbuf)) break;
+                pos += (size_t)w;
+            }
+            w = snprintf(logbuf + pos, sizeof(logbuf) - pos, "\n");
+            if (w < 0 || pos + (size_t)w >= sizeof(logbuf)) break;
+            pos += (size_t)w;
+        }
+        if (pos == 0) snprintf(logbuf, sizeof(logbuf), "(keine Frames - Bus ruhig?)");
+
+        lvgl_port_lock(-1);
+        monitorUi.setLog(logbuf, (uint16_t)frames.size());
+        lvgl_port_unlock();
     }
 
     // Status print (+ sniffer health)
