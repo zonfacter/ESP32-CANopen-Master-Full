@@ -801,15 +801,6 @@ void loop()
                               (unsigned long)dn.serial,
                               typeStr);
 
-                // Dunker: print a HEURISTIC (unverified) BG-series decode next to the
-                // raw product code, so the scheme can be validated on real hardware.
-                if (dn.known == KnownDeviceType::Dunker_75CI) {
-                    char hint[40];
-                    dunkerDecodeHint(dn.productCode, hint, sizeof(hint));
-                    Serial.printf("[IDENT-ALL] Node %u: Dunker BG-code hint (UNVERIFIED) = %s\n",
-                                  (unsigned)identifyAllNode, hint);
-                }
-
                 // Reflect the new classification in the list immediately
                 lvgl_port_lock(-1);
                 refreshStartMenuList();
