@@ -20,6 +20,17 @@ struct NodeDetail_Info {
     const char* stateText = "---";
     uint32_t lastSeenMs = 0;
     const char* typeText = "Unknown";
+
+    // Identity (1018h) - filled from discovery / identify-all / READ INFO
+    bool     identityKnown = false;
+    uint32_t vendorId = 0;
+    uint32_t productCode = 0;
+    uint32_t revision = 0;
+    uint32_t serial = 0;
+
+    // Error register (1001h, UNSIGNED8 bitfield per DS301)
+    bool    errRegValid = false;
+    uint8_t errReg = 0;
 };
 
 struct NodeDetail_Callbacks {
@@ -30,6 +41,9 @@ struct NodeDetail_Callbacks {
     std::function<void(uint8_t nodeId)> onNmtStop = nullptr;
     std::function<void(uint8_t nodeId)> onNmtResetNode = nullptr;
     std::function<void(uint8_t nodeId)> onNmtResetComm = nullptr;
+
+    // Read standard objects 1018h (identity) + 1001h (error register) via SDO
+    std::function<void(uint8_t nodeId)> onReadInfo = nullptr;
 
     // Config (AP04): set Node-ID via SDO + ResetComm
     std::function<void(uint8_t nodeId, uint8_t newNodeId)> onSetNodeId = nullptr;
@@ -72,21 +86,35 @@ public:
         lv_obj_set_style_text_color(backLbl, lv_color_hex(0xFFFFFF), 0);
         lv_obj_center(backLbl);
 
-        // Info card
-        lv_obj_t* card = lv_obj_create(m_screen);
-        lv_obj_set_size(card, 780, 110);
-        lv_obj_set_pos(card, 10, 80);
+        // Scrollable content container (everything below the header). When the
+        // keyboard appears we shrink this to the area above it and scroll the
+        // focused field into view (iPhone-style), so nothing stays hidden.
+        m_content = lv_obj_create(m_screen);
+        lv_obj_set_pos(m_content, 0, 60);
+        lv_obj_set_size(m_content, 800, 420);
+        lv_obj_set_style_bg_opa(m_content, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(m_content, 0, 0);
+        lv_obj_set_style_radius(m_content, 0, 0);
+        lv_obj_set_style_pad_all(m_content, 0, 0);
+        lv_obj_set_scroll_dir(m_content, LV_DIR_VER);
+        lv_obj_set_scrollbar_mode(m_content, LV_SCROLLBAR_MODE_AUTO);
+
+        // Info card (left column = NMT state, right column = identity + error reg)
+        lv_obj_t* card = lv_obj_create(m_content);
+        lv_obj_set_size(card, 620, 120);
+        lv_obj_set_pos(card, 10, 20);
         lv_obj_set_style_bg_color(card, lv_color_hex(0x12122A), 0);
         lv_obj_set_style_border_color(card, lv_color_hex(0x0F3460), 0);
         lv_obj_set_style_border_width(card, 2, 0);
         lv_obj_set_style_radius(card, 12, 0);
         lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
+        // Left column
         m_lblNode = lv_label_create(card);
         lv_label_set_text(m_lblNode, "Node: ---");
         lv_obj_set_style_text_color(m_lblNode, lv_color_hex(0xFFFFFF), 0);
         lv_obj_set_style_text_font(m_lblNode, &lv_font_montserrat_18, 0);
-        lv_obj_set_pos(m_lblNode, 12, 12);
+        lv_obj_set_pos(m_lblNode, 12, 10);
 
         m_lblState = lv_label_create(card);
         lv_label_set_text(m_lblState, "State: ---");
@@ -98,15 +126,57 @@ public:
         lv_label_set_text(m_lblLast, "Last seen: ---");
         lv_obj_set_style_text_color(m_lblLast, lv_color_hex(0xAAAAAA), 0);
         lv_obj_set_style_text_font(m_lblLast, &lv_font_montserrat_14, 0);
-        lv_obj_set_pos(m_lblLast, 12, 72);
+        lv_obj_set_pos(m_lblLast, 12, 80);
+
+        // Right column: identity (1018h)
+        m_lblVendor = lv_label_create(card);
+        lv_label_set_text(m_lblVendor, "Vendor: ---");
+        lv_obj_set_style_text_color(m_lblVendor, lv_color_hex(0xCCCCCC), 0);
+        lv_obj_set_style_text_font(m_lblVendor, &lv_font_montserrat_14, 0);
+        lv_obj_set_pos(m_lblVendor, 320, 8);
+
+        m_lblProduct = lv_label_create(card);
+        lv_label_set_text(m_lblProduct, "Product: ---");
+        lv_obj_set_style_text_color(m_lblProduct, lv_color_hex(0xCCCCCC), 0);
+        lv_obj_set_style_text_font(m_lblProduct, &lv_font_montserrat_14, 0);
+        lv_obj_set_pos(m_lblProduct, 320, 36);
+
+        m_lblRevSer = lv_label_create(card);
+        lv_label_set_text(m_lblRevSer, "Rev/Ser: ---");
+        lv_obj_set_style_text_color(m_lblRevSer, lv_color_hex(0xCCCCCC), 0);
+        lv_obj_set_style_text_font(m_lblRevSer, &lv_font_montserrat_14, 0);
+        lv_obj_set_pos(m_lblRevSer, 320, 64);
+
+        // Right column: error register (1001h)
+        m_lblErr = lv_label_create(card);
+        lv_label_set_text(m_lblErr, "Err 1001h: ---");
+        lv_obj_set_style_text_color(m_lblErr, lv_color_hex(0xFF6666), 0);
+        lv_obj_set_style_text_font(m_lblErr, &lv_font_montserrat_14, 0);
+        lv_obj_set_pos(m_lblErr, 320, 92);
+
+        // READ INFO button (reads 1018h identity + 1001h error register via SDO)
+        m_btnReadInfo = makeBtn("READ\nINFO", lv_color_hex(0x4A2C82), 640, 20, 150, 120,
+                                NodeDetailUI::onReadInfoClicked);
+
+        const int x = 10;
+
+        // Config row (Node-ID)
+        m_taNodeId = lv_textarea_create(m_content);
+        lv_obj_set_size(m_taNodeId, 160, 48);
+        lv_obj_set_pos(m_taNodeId, x, 148);
+        lv_textarea_set_one_line(m_taNodeId, true);
+        lv_textarea_set_accepted_chars(m_taNodeId, "0123456789");
+        lv_textarea_set_max_length(m_taNodeId, 3);
+        lv_textarea_set_text(m_taNodeId, "1");
+        lv_textarea_set_placeholder_text(m_taNodeId, "Node-ID");
+        m_btnSetNodeId = makeBtn("SET NODE-ID", lv_color_hex(0x1D4ED8), x + 180, 146, 250, 52,
+                                 NodeDetailUI::onSetNodeIdClicked);
 
         // NMT buttons
-        int x = 10;
-        int y = 210;
         const int w = 250;
-        const int h = 70;
-        const int gap = 15;
-
+        const int h = 64;
+        const int gap = 14;
+        int y = 214;
         m_btnStart = makeBtn("NMT START", lv_color_hex(0x007744), x, y, w, h, NodeDetailUI::onStartClicked);
         m_btnPreOp = makeBtn("NMT PRE-OP", lv_color_hex(0xCC6600), x + (w + gap), y, w, h, NodeDetailUI::onPreOpClicked);
         m_btnStop  = makeBtn("NMT STOP", lv_color_hex(0x444444), x + 2*(w + gap), y, w, h, NodeDetailUI::onStopClicked);
@@ -115,25 +185,16 @@ public:
         m_btnResetNode = makeBtn("RESET NODE", lv_color_hex(0x666666), x, y, w, h, NodeDetailUI::onResetNodeClicked);
         m_btnResetComm = makeBtn("RESET COMM", lv_color_hex(0x666666), x + (w + gap), y, w, h, NodeDetailUI::onResetCommClicked);
 
-        // Config row (AP04 / generic): Node-ID set
-        y += h + gap;
-        m_taNodeId = lv_textarea_create(m_screen);
-        lv_obj_set_size(m_taNodeId, 160, 52);
-        lv_obj_set_pos(m_taNodeId, x, y + 9);
-        lv_textarea_set_one_line(m_taNodeId, true);
-        lv_textarea_set_accepted_chars(m_taNodeId, "0123456789");
-        lv_textarea_set_max_length(m_taNodeId, 3);
-        lv_textarea_set_text(m_taNodeId, "1");
-        lv_textarea_set_placeholder_text(m_taNodeId, "Node-ID");
-
-        // On-screen numeric keypad (simple)
+        // On-screen numeric keypad (sibling of m_content so it never scrolls);
+        // hidden until the Node-ID field is focused, bottom-aligned.
         m_kb = lv_keyboard_create(m_screen);
         lv_keyboard_set_mode(m_kb, LV_KEYBOARD_MODE_NUMBER);
-        lv_keyboard_set_textarea(m_kb, m_taNodeId);
-        lv_obj_set_width(m_kb, 780);
-        lv_obj_set_pos(m_kb, 10, 520);
-
-        m_btnSetNodeId = makeBtn("SET NODE-ID", lv_color_hex(0x1D4ED8), x + 180, y, 250, h, NodeDetailUI::onSetNodeIdClicked);
+        lv_obj_set_size(m_kb, 800, KB_HEIGHT);
+        lv_obj_align(m_kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_obj_add_flag(m_kb, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_event_cb(m_kb, NodeDetailUI::onKbReady, LV_EVENT_READY,  nullptr);
+        lv_obj_add_event_cb(m_kb, NodeDetailUI::onKbReady, LV_EVENT_CANCEL, nullptr);
+        lv_obj_add_event_cb(m_taNodeId, NodeDetailUI::onTaFocused, LV_EVENT_FOCUSED, nullptr);
 
         s_inst = this;
     }
@@ -159,6 +220,46 @@ public:
             if (info.lastSeenMs == 0) snprintf(b, sizeof(b), "Last seen: ---");
             else snprintf(b, sizeof(b), "Last seen: %lu ms", (unsigned long)info.lastSeenMs);
             lv_label_set_text(m_lblLast, b);
+        }
+
+        // Identity (1018h)
+        if (m_lblVendor) {
+            char b[48];
+            if (info.identityKnown) snprintf(b, sizeof(b), "Vendor: 0x%08lX", (unsigned long)info.vendorId);
+            else snprintf(b, sizeof(b), "Vendor: ---");
+            lv_label_set_text(m_lblVendor, b);
+        }
+        if (m_lblProduct) {
+            char b[64];
+            if (info.identityKnown) {
+                char ascii[8];
+                productAscii(info.productCode, ascii, sizeof(ascii));
+                if (ascii[0]) snprintf(b, sizeof(b), "Product: 0x%08lX (%s)", (unsigned long)info.productCode, ascii);
+                else          snprintf(b, sizeof(b), "Product: 0x%08lX", (unsigned long)info.productCode);
+            } else {
+                snprintf(b, sizeof(b), "Product: ---");
+            }
+            lv_label_set_text(m_lblProduct, b);
+        }
+        if (m_lblRevSer) {
+            char b[64];
+            if (info.identityKnown) snprintf(b, sizeof(b), "Rev: 0x%08lX Ser: 0x%08lX",
+                                             (unsigned long)info.revision, (unsigned long)info.serial);
+            else snprintf(b, sizeof(b), "Rev/Ser: ---");
+            lv_label_set_text(m_lblRevSer, b);
+        }
+
+        // Error register (1001h)
+        if (m_lblErr) {
+            char b[64];
+            if (info.errRegValid) {
+                char dec[40];
+                errRegDecode(info.errReg, dec, sizeof(dec));
+                snprintf(b, sizeof(b), "Err 1001h: 0x%02X [%s]", (unsigned)info.errReg, dec);
+            } else {
+                snprintf(b, sizeof(b), "Err 1001h: ---");
+            }
+            lv_label_set_text(m_lblErr, b);
         }
     }
 
@@ -194,9 +295,65 @@ private:
         s_inst->m_cbs.onSetNodeId(s_inst->m_info.nodeId, (uint8_t)v);
     }
 
+    static void onReadInfoClicked(lv_event_t*) {
+        if (s_inst && s_inst->m_cbs.onReadInfo) s_inst->m_cbs.onReadInfo(s_inst->m_info.nodeId);
+    }
+
+    // Keyboard show/hide with iPhone-style content scrolling.
+    static void onTaFocused(lv_event_t* ev) {
+        if (!s_inst || !s_inst->m_kb) return;
+        lv_obj_t* ta = lv_event_get_target(ev);
+        lv_keyboard_set_textarea(s_inst->m_kb, ta);
+        lv_obj_clear_flag(s_inst->m_kb, LV_OBJ_FLAG_HIDDEN);
+        // Shrink the scroll area to the space above the keyboard, then bring the
+        // focused field into view. Lower widgets stay reachable by scrolling.
+        lv_obj_set_height(s_inst->m_content, 480 - HEADER_H - KB_HEIGHT);
+        lv_obj_scroll_to_view(ta, LV_ANIM_ON);
+    }
+    static void onKbReady(lv_event_t*) {
+        if (!s_inst || !s_inst->m_kb) return;
+        lv_obj_add_flag(s_inst->m_kb, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_height(s_inst->m_content, 480 - HEADER_H);
+        lv_obj_scroll_to_y(s_inst->m_content, 0, LV_ANIM_ON);
+    }
+
+    // Render the product-code as ASCII if its bytes are printable (e.g. AP04 = "CAN").
+    static void productAscii(uint32_t pc, char* out, size_t n) {
+        if (!out || n == 0) return;
+        out[0] = 0;
+        char tmp[5];
+        int k = 0;
+        for (int i = 0; i < 4; i++) {
+            char c = (char)((pc >> (8 * i)) & 0xFF);
+            if (c == 0) break;                 // string terminator
+            if (c < 32 || c > 126) { k = 0; break; } // non-printable -> not ASCII
+            tmp[k++] = c;
+        }
+        if (k >= 2) { tmp[k] = 0; snprintf(out, n, "%s", tmp); }
+    }
+
+    // Decode the DS301 error-register (1001h) bitfield into a compact string.
+    static void errRegDecode(uint8_t e, char* out, size_t n) {
+        if (!out || n == 0) return;
+        if (e == 0) { snprintf(out, n, "OK"); return; }
+        out[0] = 0;
+        size_t len = 0;
+        auto add = [&](const char* s) {
+            if (len >= n) return;
+            len += snprintf(out + len, n - len, "%s%s", len ? "|" : "", s);
+        };
+        if (e & 0x01) add("GEN");   // generic error
+        if (e & 0x02) add("CUR");   // current
+        if (e & 0x04) add("VOLT");  // voltage
+        if (e & 0x08) add("TEMP");  // temperature
+        if (e & 0x10) add("COMM");  // communication
+        if (e & 0x20) add("PROF");  // device profile specific
+        if (e & 0x80) add("MFR");   // manufacturer specific
+    }
+
     lv_obj_t* makeBtn(const char* text, lv_color_t bg, int x, int y, int w, int h,
                       lv_event_cb_t cb) {
-        lv_obj_t* b = lv_btn_create(m_screen);
+        lv_obj_t* b = lv_btn_create(m_content);
         lv_obj_set_size(b, w, h);
         lv_obj_set_pos(b, x, y);
         lv_obj_set_style_bg_color(b, bg, 0);
@@ -210,13 +367,24 @@ private:
         return b;
     }
 
+    static constexpr int HEADER_H = 60;
+    static constexpr int KB_HEIGHT = 190;
+
     lv_obj_t* m_screen = nullptr;
+    lv_obj_t* m_content = nullptr;
     NodeDetail_Info m_info;
     NodeDetail_Callbacks m_cbs;
 
     lv_obj_t* m_lblNode = nullptr;
     lv_obj_t* m_lblState = nullptr;
     lv_obj_t* m_lblLast = nullptr;
+
+    // Identity + error-register widgets
+    lv_obj_t* m_lblVendor = nullptr;
+    lv_obj_t* m_lblProduct = nullptr;
+    lv_obj_t* m_lblRevSer = nullptr;
+    lv_obj_t* m_lblErr = nullptr;
+    lv_obj_t* m_btnReadInfo = nullptr;
 
     lv_obj_t* m_btnStart = nullptr;
     lv_obj_t* m_btnPreOp = nullptr;

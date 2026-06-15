@@ -70,6 +70,56 @@ static inline bool knownDeviceWantsAutoStart(KnownDeviceType t) {
     return t == KnownDeviceType::SIKO_AP04 || t == KnownDeviceType::SIKO_AP10;
 }
 
+// Map a CANopen identity (1018h vendor-id / product-code) to a known device type.
+// Used by the passive "Identify All" feature (no connect required).
+static inline KnownDeviceType classifyByIdentity(uint32_t vendorId, uint32_t productCode) {
+    // SIKO vendor-id = 0x00000195
+    if (vendorId == 0x00000195UL) {
+        // AP04 reports product-code ASCII "CAN" = 0x004E4143
+        if (productCode == 0x004E4143UL) return KnownDeviceType::SIKO_AP04;
+        // Any other SIKO product -> treat as AP10 family (positioning display)
+        return KnownDeviceType::SIKO_AP10;
+    }
+    // Dunkermotoren GmbH vendor-id = 0x00000257 (CiA CANopen vendor-id registry).
+    // We only have one Dunker type in the enum so far; product-code could later
+    // distinguish individual drive models.
+    if (vendorId == 0x00000257UL) {
+        return KnownDeviceType::Dunker_75CI;
+    }
+    // Unknown vendor -> stay honest.
+    return KnownDeviceType::Unknown;
+}
+
+// HEURISTIC, UNVERIFIED decoder for Dunker BG-series product codes.
+// Layout assumption (community-inferred from EDS files / installations,
+// NOT officially documented by Dunkermotoren): product-code = 0x00MMVVTT
+//   MM = motor series byte (0x22/0x32/0x45/0x65/0x75 = BG22..BG75)
+//   VV = mechanical variant (0x10 std, 0x20 encoder, 0x30 brake, 0x40 gear, 0x50 custom)
+//   TT = electronics (0x01..0x03 integrated, 0x10/0x20/0x30 = BGE5510/6010/6060)
+// IMPORTANT: For diagnostic display/logging ONLY. Never drive control logic from
+// this until the scheme is confirmed against real hardware product codes.
+static inline void dunkerDecodeHint(uint32_t productCode, char* out, size_t n) {
+    if (!out || n == 0) return;
+
+    const uint8_t mm = (uint8_t)((productCode >> 16) & 0xFF);
+    const uint8_t vv = (uint8_t)((productCode >> 8) & 0xFF);
+    const uint8_t tt = (uint8_t)(productCode & 0xFF);
+
+    const char* series =
+        (mm == 0x22) ? "BG22" : (mm == 0x32) ? "BG32" : (mm == 0x45) ? "BG45" :
+        (mm == 0x65) ? "BG65" : (mm == 0x75) ? "BG75" : "BG??";
+
+    const char* variant =
+        (vv == 0x10) ? "Standard" : (vv == 0x20) ? "Encoder" : (vv == 0x30) ? "Brake" :
+        (vv == 0x40) ? "Gear"     : (vv == 0x50) ? "Custom"  : "Variant?";
+
+    const char* elec =
+        (tt == 0x01) ? "IE-Std" : (tt == 0x02) ? "IE-CANopen" : (tt == 0x03) ? "IE-IO/PWM" :
+        (tt == 0x10) ? "BGE5510" : (tt == 0x20) ? "BGE6010"   : (tt == 0x30) ? "BGE6060" : "Elec?";
+
+    snprintf(out, n, "%s/%s/%s", series, variant, elec);
+}
+
 struct DiscoveredNode {
     bool     seen = false;
     uint8_t  nodeId = 0;
@@ -80,6 +130,8 @@ struct DiscoveredNode {
     bool     sdoOk = false; // at least one identify read succeeded
     uint32_t vendorId = 0;      // 1018h:01
     uint32_t productCode = 0;   // 1018h:02 (ASCII "CAN" for AP04)
+    uint32_t revision = 0;      // 1018h:03 (revision number)
+    uint32_t serial = 0;        // 1018h:04 (serial number)
     uint8_t  identityEntries = 0; // 1018h:00
 
     // AP04 module identification (650Ah)
@@ -385,20 +437,26 @@ public:
 
                 if (m_mode != MasterMode::OnlineKnown) setMode(MasterMode::OnlineKnown);
             } else if (nd.sdoOk) {
-                // We got *some* SDO info, but it doesn't match AP04.
-                Serial.printf("[MASTER] Identify OK but not AP04: entries=%u vendor=0x%08lX product=0x%08lX 650A:00=%u -> Unknown\n",
-                    (unsigned)nd.identityEntries,
+                // Got SDO identity but it's not AP04 -> classify by vendor/product
+                // (Dunker, SIKO AP10, ...). This keeps a connected Dunker recognised
+                // so the UI can route to its DS402 page.
+                nd.known    = classifyByIdentity(nd.vendorId, nd.productCode);
+                m_knownType = nd.known;
+
+                Serial.printf("[MASTER] Identify (non-AP04): vendor=0x%08lX product=0x%08lX -> %s\n",
                     (unsigned long)nd.vendorId,
                     (unsigned long)nd.productCode,
-                    (unsigned)nd.moduleIdSubs);
+                    (nd.known == KnownDeviceType::Dunker_75CI) ? "Dunker_75CI" :
+                    (nd.known == KnownDeviceType::SIKO_AP10)   ? "SIKO_AP10"   : "Unknown");
 
-                nd.known = KnownDeviceType::Unknown;
-                m_knownType = KnownDeviceType::Unknown;
-
-                // For now, disable SYNC for non-AP04.
+                // Non-AP04 devices don't need master SYNC (Dunker uses DS402 controlword).
                 m_syncEnabled = false;
 
-                if (m_mode != MasterMode::OnlineStandard) setMode(MasterMode::OnlineStandard);
+                if (nd.known == KnownDeviceType::Unknown) {
+                    if (m_mode != MasterMode::OnlineStandard) setMode(MasterMode::OnlineStandard);
+                } else {
+                    if (m_mode != MasterMode::OnlineKnown) setMode(MasterMode::OnlineKnown);
+                }
             } else {
                 Serial.println("[MASTER] Identify failed/timeout -> Unknown (keep SYNC ON for safety until disconnect)");
                 nd.known = KnownDeviceType::Unknown;
