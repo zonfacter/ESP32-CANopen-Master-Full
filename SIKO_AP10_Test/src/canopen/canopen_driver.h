@@ -305,6 +305,17 @@ public:
     uint32_t txCount() const { return m_txCount; }
     uint32_t errCount() const { return m_errorCount; }
 
+    // True while it is safe to keep transmitting. Used by active auto-scan to
+    // stop probing a wrong baudrate before the unacked TX pushes us to bus-off.
+    bool busHealthyForTx() const
+    {
+        if (!m_running) return false;
+        twai_status_info_t s;
+        if (twai_get_status_info(&s) != ESP_OK) return false;
+        if (s.state == TWAI_STATE_BUS_OFF) return false;
+        return s.tx_error_counter < 96;   // below error-passive (128) / bus-off (256)
+    }
+
     bool pollReceive(uint32_t timeoutMs, uint32_t& outCobId, uint8_t* outData, uint8_t& outLen)
     {
         if (!m_initialized) return false;

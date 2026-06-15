@@ -52,7 +52,7 @@ struct Config {
     static constexpr uint32_t UI_UPDATE_MS    = 200;
     static constexpr uint32_t STATUS_PRINT_MS = 5000;
 
-    static constexpr uint32_t SCAN_WINDOW_MS = 1200;
+    static constexpr uint32_t SCAN_WINDOW_MS = 1500;  // probe sweep (~1s) + response slack
 
     // CANopen practical baudrates. 10k/20k are intentionally omitted: they need a
     // large TWAI prescaler that some cores/SoCs don't expose, and CANopen devices
@@ -141,6 +141,14 @@ static uint8_t  scanBaudIdx = 0;
 static uint32_t scanStepStartMs = 0;
 static uint32_t activeBaud = Config::CAN_DEFAULT_BAUDRATE;
 
+// Active auto-scan probe: at each baud we actively send SDO reads (0x1000:00)
+// to nodes 1..32 and listen for responses, instead of only passively waiting
+// for spontaneous traffic (which misses devices that are quiet in the window).
+static uint8_t  scanProbeNode = 1;
+static uint32_t scanProbeLastMs = 0;
+static constexpr uint8_t  SCAN_PROBE_MAX_NODE = 32;
+static constexpr uint32_t SCAN_PROBE_INTERVAL_MS = 30;
+
 // ============================================================================
 // CAN RX Callback
 // ============================================================================
@@ -172,6 +180,21 @@ static void onCanFrame(uint32_t cobId, const uint8_t* data, uint8_t length)
             dn.seen = true;
             dn.lastSeenMs = millis();
             Serial.printf("[PING] Node %u responded (COB-ID=0x%03lX)\n", (unsigned)nid, (unsigned long)cobId);
+        }
+    }
+
+    // Active auto-scan detect: any SDO response (0x581..0x5FF) means a node is
+    // alive at the current baud (passive heartbeat detection still works too).
+    if (scanRunning && cobId >= 0x581 && cobId <= 0x5FF) {
+        const uint8_t nid = (uint8_t)(cobId - 0x580);
+        if (nid >= 1 && nid <= 127) {
+            auto& dn = master.node(nid);
+            if (!dn.seen) {
+                Serial.printf("[SCAN] Node %u antwortet @ %lu bps\n",
+                              (unsigned)nid, (unsigned long)activeBaud);
+            }
+            dn.seen = true;
+            dn.lastSeenMs = millis();
         }
     }
 
@@ -333,16 +356,40 @@ static void startAutoBaudScan()
     scanRunning = true;
     scanBaudIdx = 0;
     scanStepStartMs = millis();
+    scanProbeNode = 1;
+    scanProbeLastMs = 0;
 
     master.setMode(MasterMode::Scanning);
     master.resetDiscovery();
 
-    Serial.println("[SCAN] Auto-Baud Scan gestartet");
+    Serial.println("[SCAN] Auto-Baud Scan gestartet (aktiv: SDO-Ping 1..32 je Baud)");
 
     activeBaud = Config::SCAN_BAUDS[scanBaudIdx];
     Serial.printf("[SCAN] Set baud %lu\n", (unsigned long)activeBaud);
 
     requestCanReinit(activeBaud, loopbackEnabled);
+}
+
+// Active probe: while scanning, send one SDO read (0x1000:00) per interval,
+// cycling nodes 1..SCAN_PROBE_MAX_NODE. Responses are detected in onCanFrame.
+static void scanActiveProbe(uint32_t now)
+{
+    if (!scanRunning) return;
+    if (scanProbeNode > SCAN_PROBE_MAX_NODE) return;          // swept this baud
+    if (now - scanProbeLastMs < SCAN_PROBE_INTERVAL_MS) return;
+
+    // Safety: at a wrong baud our frames are never ACKed and the TX error counter
+    // climbs toward bus-off. Stop probing this baud once the bus is unhealthy;
+    // the next baud's re-init resets the controller anyway.
+    if (!canDriver.busHealthyForTx()) {
+        scanProbeNode = SCAN_PROBE_MAX_NODE + 1;              // stop sweeping this baud
+        return;
+    }
+
+    uint8_t sdo[8] = { 0x40, 0x00, 0x10, 0x00, 0, 0, 0, 0 };  // read 0x1000:00
+    canDriver.sendFrame(0x600 + scanProbeNode, sdo, 8);
+    scanProbeLastMs = now;
+    scanProbeNode++;
 }
 
 static void scanTick(uint32_t now)
@@ -377,6 +424,8 @@ static void scanTick(uint32_t now)
     }
 
     scanStepStartMs = now;
+    scanProbeNode = 1;          // re-sweep nodes 1..32 at the new baud
+    scanProbeLastMs = now;
     activeBaud = Config::SCAN_BAUDS[scanBaudIdx];
     Serial.printf("[SCAN] Set baud %lu\n", (unsigned long)activeBaud);
 
@@ -633,7 +682,8 @@ void loop()
 {
     const uint32_t now = millis();
 
-    // Scan state machine tick
+    // Scan state machine tick (+ active SDO probing per baud)
+    scanActiveProbe(now);
     scanTick(now);
 
     // Centralized CAN re-init handler (baud + loopback)
