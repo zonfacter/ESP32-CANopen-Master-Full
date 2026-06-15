@@ -38,6 +38,30 @@ enum SdoResult {
     SDO_BUSY        = 3
 };
 
+// Human-readable CANopen SDO abort codes (subset; adapted from
+// ESP32-CANopen-Master-Light). Helps when reading the serial log / monitor.
+static inline const char* sdoAbortText(uint32_t code) {
+    switch (code) {
+        case 0x05040000: return "SDO Protokoll-Timeout";
+        case 0x05040001: return "ungueltiger Command-Specifier";
+        case 0x06010000: return "Zugriff nicht unterstuetzt";
+        case 0x06010001: return "Schreibzugriff auf read-only";
+        case 0x06010002: return "Lesezugriff auf write-only";
+        case 0x06020000: return "Objekt existiert nicht";
+        case 0x06070010: return "Datentyp passt nicht";
+        case 0x06070012: return "Datenlaenge zu gross";
+        case 0x06070013: return "Datenlaenge zu klein";
+        case 0x06090011: return "Subindex existiert nicht";
+        case 0x06090030: return "Wert ausserhalb des Bereichs";
+        case 0x06090031: return "Wert zu hoch";
+        case 0x06090032: return "Wert zu niedrig";
+        case 0x08000000: return "allgemeiner Fehler";
+        case 0x08000020: return "Daten nicht uebertragbar";
+        case 0x08000022: return "nicht uebertragbar (Geraetestatus)";
+        default:         return "unbekannter Abort-Code";
+    }
+}
+
 // ============================================================================
 // SDO Client Klasse
 // ============================================================================
@@ -111,8 +135,8 @@ public:
                               ((uint32_t)data[5] << 8) |
                               ((uint32_t)data[6] << 16) |
                               ((uint32_t)data[7] << 24);
-            Serial.printf("[SDO] ABORT Index=0x%04X Sub=%d Code=0x%08lX\n",
-                         index, sub, (unsigned long)m_lastAbortCode);
+            Serial.printf("[SDO] ABORT Index=0x%04X Sub=%d Code=0x%08lX (%s)\n",
+                         index, sub, (unsigned long)m_lastAbortCode, sdoAbortText(m_lastAbortCode));
             finishTransaction(SDO_ERROR, 0);
 
         } else if (!m_pendingWrite && (cmd & 0x40)) {

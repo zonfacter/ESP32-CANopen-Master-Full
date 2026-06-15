@@ -59,8 +59,9 @@ struct Config {
     // CANopen practical baudrates. 10k/20k are intentionally omitted: they need a
     // large TWAI prescaler that some cores/SoCs don't expose, and CANopen devices
     // virtually never run that slow.
+    // Ordered by field frequency (most common first) so typical buses lock fast.
     static constexpr uint32_t SCAN_BAUDS[] = {
-        1000000, 500000, 250000, 125000, 100000, 50000
+        125000, 250000, 500000, 1000000, 100000, 50000
     };
     static constexpr uint8_t SCAN_BAUD_COUNT = sizeof(SCAN_BAUDS) / sizeof(SCAN_BAUDS[0]);
 };
@@ -367,7 +368,7 @@ static void startAutoBaudScan()
     scanRunning = true;
     scanBaudIdx = 0;
     scanStepStartMs = millis();
-    scanProbeNode = 1;
+    scanProbeNode = 0;          // 0 = NMT broadcast, then 1..32 SDO pings
     scanProbeLastMs = 0;
 
     master.setMode(MasterMode::Scanning);
@@ -398,8 +399,16 @@ static void scanActiveProbe(uint32_t now)
         return;
     }
 
-    uint8_t sdo[8] = { 0x40, 0x00, 0x10, 0x00, 0, 0, 0, 0 };  // read 0x1000:00
-    canDriver.sendFrame(0x600 + scanProbeNode, sdo, 8);
+    if (scanProbeNode == 0) {
+        // Gentle first probe (idea from ESP32-CANopen-Master-Light): an NMT
+        // "Start All Nodes" broadcast makes nodes boot/heartbeat at the correct
+        // baud -> detected passively, without flooding the bus.
+        uint8_t nmt[2] = { 0x01, 0x00 };
+        canDriver.sendFrame(0x000, nmt, 2);
+    } else {
+        uint8_t sdo[8] = { 0x40, 0x00, 0x10, 0x00, 0, 0, 0, 0 };  // read 0x1000:00
+        canDriver.sendFrame(0x600 + scanProbeNode, sdo, 8);
+    }
     scanProbeLastMs = now;
     scanProbeNode++;
 }
@@ -440,7 +449,7 @@ static void scanTick(uint32_t now)
     }
 
     scanStepStartMs = now;
-    scanProbeNode = 1;          // re-sweep nodes 1..32 at the new baud
+    scanProbeNode = 0;          // re-probe (NMT broadcast + nodes 1..32) at the new baud
     scanProbeLastMs = now;
     activeBaud = Config::SCAN_BAUDS[scanBaudIdx];
     Serial.printf("[SCAN] Set baud %lu\n", (unsigned long)activeBaud);
