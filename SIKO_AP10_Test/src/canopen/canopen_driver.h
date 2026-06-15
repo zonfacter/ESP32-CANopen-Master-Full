@@ -110,15 +110,27 @@ private:
 
         twai_timing_config_t t_cfg;
         switch (baudrate) {
+            // 10k/20k need a large baud-rate prescaler. The convenience macros are
+            // only defined when SOC_TWAI_BRP_MAX is big enough; on cores/SoCs where
+            // they are absent these cases are compiled out (and fall to default),
+            // instead of breaking the build.
+#if defined(TWAI_TIMING_CONFIG_10KBITS)
             case 10000:   t_cfg = TWAI_TIMING_CONFIG_10KBITS();   break;
+#endif
+#if defined(TWAI_TIMING_CONFIG_20KBITS)
             case 20000:   t_cfg = TWAI_TIMING_CONFIG_20KBITS();   break;
+#endif
             case 50000:   t_cfg = TWAI_TIMING_CONFIG_50KBITS();   break;
             case 100000:  t_cfg = TWAI_TIMING_CONFIG_100KBITS();  break;
             case 125000:  t_cfg = TWAI_TIMING_CONFIG_125KBITS();  break;
             case 250000:  t_cfg = TWAI_TIMING_CONFIG_250KBITS();  break;
             case 500000:  t_cfg = TWAI_TIMING_CONFIG_500KBITS();  break;
             case 1000000: t_cfg = TWAI_TIMING_CONFIG_1MBITS();    break;
-            default:      t_cfg = TWAI_TIMING_CONFIG_250KBITS();  break;
+            default:
+                Serial.printf("[CANopen] WARN: baud %lu not supported here -> using 250k\n",
+                              (unsigned long)baudrate);
+                t_cfg = TWAI_TIMING_CONFIG_250KBITS();
+                break;
         }
 
         twai_filter_config_t f_cfg = TWAI_FILTER_CONFIG_ACCEPT_ALL();

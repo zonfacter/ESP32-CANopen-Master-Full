@@ -54,9 +54,13 @@ struct Config {
 
     static constexpr uint32_t SCAN_WINDOW_MS = 1200;
 
-    static constexpr uint32_t SCAN_BAUDS[8] = {
-        1000000, 500000, 250000, 125000, 100000, 50000, 20000, 10000
+    // CANopen practical baudrates. 10k/20k are intentionally omitted: they need a
+    // large TWAI prescaler that some cores/SoCs don't expose, and CANopen devices
+    // virtually never run that slow.
+    static constexpr uint32_t SCAN_BAUDS[] = {
+        1000000, 500000, 250000, 125000, 100000, 50000
     };
+    static constexpr uint8_t SCAN_BAUD_COUNT = sizeof(SCAN_BAUDS) / sizeof(SCAN_BAUDS[0]);
 };
 
 // ============================================================================
@@ -362,7 +366,7 @@ static void scanTick(uint32_t now)
     }
 
     scanBaudIdx++;
-    if (scanBaudIdx >= 8) {
+    if (scanBaudIdx >= Config::SCAN_BAUD_COUNT) {
         Serial.println("[SCAN] Kein CANopen Traffic erkannt (alle Baudraten getestet)");
         scanRunning = false;
         master.setMode(MasterMode::Idle);
