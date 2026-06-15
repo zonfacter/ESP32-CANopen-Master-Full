@@ -290,6 +290,12 @@ public:
                 [this, w](SdoResult r, uint32_t){
                     if (r == SDO_OK) {
                         if (w.index == DS402_OBJ::CONTROLWORD) m_data.lastControlword = (uint16_t)w.value;
+                    } else if (w.index == 0x2000 && w.sub != 0x01 && r == SDO_TIMEOUT) {
+                        // The drive applies node-id/baud and re-initialises WITHOUT
+                        // sending an SDO confirmation -> a timeout here is expected.
+                        // The value still takes effect after a power-cycle.
+                        Serial.printf("[DUNKER] 0x2000:%u no SDO confirm (expected; value applies after power-cycle)\n",
+                                      (unsigned)w.sub);
                     } else {
                         Serial.printf("[DUNKER] write 0x%04X:%u failed (%d)\n", w.index, (unsigned)w.sub, (int)r);
                     }
