@@ -756,7 +756,7 @@ void setup()
         ecoWriteNextMs = millis();
         Serial.printf("[ECO] node %u: set baud %lu -> P-0-4079=%lu (0x3FEF:07, 4B)\n",
                       (unsigned)nodeId, (unsigned long)baud, (unsigned long)v);
-        nodeUi.setBaudStatus("P-0-4079 (0x3FEF:07) lesen + schreiben ...", true);
+        nodeUi.setBaudStatus("NMT Pre-Op -> P-0-4079 (0x3FEF:07) lesen + schreiben ...", true);
     };
 
     ncbs.onSetNodeId = [](uint8_t nodeId, uint8_t newNodeId){
@@ -1080,6 +1080,22 @@ void loop()
         switch (ecoWriteStep) {
             case 0:
                 ecoWriteStep = 1;
+                // Put the drive into parameter mode automatically: NMT
+                // Pre-Operational (0x000 {0x80, node}). This is the SAFE way to
+                // leave operating mode (phase 4) for SDO config -- it only stops
+                // process data, it does NOT enable the drive. (We never touch the
+                // P-0-4077 control word: that is the master control word
+                // S-0-0134 and would risk drive enable / motion.)
+                {
+                    uint8_t nmt[2] = { 0x80, ecoWriteNode };  // enter Pre-Operational
+                    canDriver.sendFrame(0x000, nmt, 2);
+                    Serial.printf("[ECO] NMT Pre-Operational -> node %u (parameter mode)\n",
+                                  (unsigned)ecoWriteNode);
+                }
+                ecoWriteNextMs = millis() + 300;   // give the drive time to switch
+                break;
+            case 1:
+                ecoWriteStep = 2;
                 ecoCurBaudOk = false;
                 stdSdo.readAsync(0x3FEF, 0x07, [](SdoResult r, uint32_t v){
                     ecoCurBaudOk = (r == SDO_OK); ecoCurBaudCode = v;
@@ -1088,8 +1104,8 @@ void loop()
                 });
                 ecoWriteNextMs = millis() + 60;
                 break;
-            case 1:
-                ecoWriteStep = 2;
+            case 2:
+                ecoWriteStep = 3;
                 ecoStatusOk = false;
                 stdSdo.readAsync(0x3FEE, 0x07, [](SdoResult r, uint32_t v){
                     ecoStatusOk = (r == SDO_OK); ecoStatusWord = (uint16_t)(v & 0xFFFF);
@@ -1098,8 +1114,8 @@ void loop()
                 });
                 ecoWriteNextMs = millis() + 80;
                 break;
-            case 2:
-                ecoWriteStep = 3;
+            case 3:
+                ecoWriteStep = 4;
                 ecoBaudOk = false;
                 stdSdo.writeAsync(0x3FEF, 0x07, ecoBaudVal, 4, [](SdoResult r, uint32_t){
                     ecoBaudOk = (r == SDO_OK);
