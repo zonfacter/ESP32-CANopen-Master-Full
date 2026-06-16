@@ -297,6 +297,84 @@ The Bosch Rexroth ECODRIVE baud-rate workflow is a good example:
 - write only after guards are satisfied
 - log detailed diagnostics if blocked
 
+## Prior Art And Possible Reuse
+
+Several open-source CANopen projects can inform this architecture. They should be treated differently depending on license and target fit.
+
+### CANopenNode
+
+Repository: <https://github.com/CANopenNode/CANopenNode>
+
+CANopenNode is an Apache-2.0 CANopen protocol stack written in ANSI C. It includes many building blocks that are relevant to this project:
+
+- DS301 / CiA 301 base stack
+- NMT handling
+- heartbeat / node guarding
+- SDO server and SDO client
+- EMCY
+- PDO mapping concepts
+- LSS master/slave and LSS fastscan
+- CiA 309-3 gateway / ASCII command ideas
+- non-volatile object dictionary storage concepts
+- object dictionary structure and editor workflow
+
+Potential use:
+
+- reference implementation for protocol behavior and edge cases
+- possible future replacement or optional backend for parts of the CANopen stack
+- reference for LSS fastscan and SDO client robustness
+- reference for object dictionary and EDS/XDD tooling
+
+Integration note:
+
+- Direct integration should be evaluated carefully because the current project already has a small custom CANopen master layer. A full stack may add size and complexity on ESP32.
+- Short-term: use as reference and test oracle.
+- Long-term: consider importing selected Apache-2.0-compatible components only if the local implementation becomes too costly to maintain.
+
+### MHS TinyCanOpen
+
+Repository: <https://github.com/MHS-Elektronik/TinyCanOpen>
+
+TinyCanOpen is a virtual CANopen device based on CANopenNode with a GUI. It is Apache-2.0 licensed.
+
+Potential use:
+
+- host-side simulation device for scan / identify / SDO tests
+- regression test companion for DS301 behavior
+- inspiration for a small virtual device fixture
+- helpful for testing without physical CANopen hardware attached
+
+Integration note:
+
+- This is not a firmware component for the ESP32 target.
+- It is useful as external test tooling, especially if combined with SLCAN/Tiny-CAN compatible hardware or a PC-side CAN interface.
+
+### MHS CanOpenMonitor
+
+Repository: <https://github.com/MHS-Elektronik/CanOpenMonitor>
+
+CanOpenMonitor is a CANopen logging and injection tool. It provides useful architectural ideas:
+
+- plugin model for protocol decoding and actions
+- NMT plugin
+- SDO editor
+- EDS-based object dictionary display
+- DCF save/load concepts
+- EEPROM plugin for `0x1010` / `0x1011`
+- human-readable SDO/PDO decoding
+- warning that live bus interaction can be dangerous
+
+Potential use:
+
+- UI and workflow inspiration
+- EDS/DCF concept reference
+- useful external PC tool during development and debugging
+
+License note:
+
+- CanOpenMonitor is GPL-3.0. Do not copy code into this firmware project unless the project intentionally accepts GPL obligations.
+- Safe use: study concepts, use as an external tool, or document compatible workflows.
+
 ## Suggested File Layout
 
 ```text
