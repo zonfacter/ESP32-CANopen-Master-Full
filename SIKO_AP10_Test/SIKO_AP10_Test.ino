@@ -736,7 +736,7 @@ void setup()
         Serial.printf("[STD] Read 1018h+1001h for node %u\n", (unsigned)nodeId);
     };
 
-    // Set baudrate - device-specific. Bosch Rexroth ECODRIVE: P-0-4079 @ 0x3FF5:01
+    // Set baudrate - device-specific. Bosch Rexroth ECODRIVE: P-0-4079 @ 0x3FEF:07
     // (own value table) + save 0x1010:01, then power-cycle.
     ncbs.onSetBaud = [](uint8_t nodeId, uint32_t baud){
         const auto& dn = master.node(nodeId);
@@ -1068,7 +1068,7 @@ void loop()
         }
     }
 
-    // Bosch Rexroth ECODRIVE baud write sequencer (P-0-4079 @ 0x3FF5:01, then
+    // Bosch Rexroth ECODRIVE baud sequencer (P-0-4079 @ 0x3FEF:07; read+status+write, then
     // save via 0x1010:01 = "save"). Reuses stdSdo. Power-cycle to apply.
     if (ecoWriteRunning && !stdSdo.isBusy() && (int32_t)(millis() - ecoWriteNextMs) >= 0) {
         // Correct objects (P-param -> 0x3000+IDN, operation data on subindex 7):
