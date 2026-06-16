@@ -188,7 +188,7 @@ public:
         m_btnResetNode = makeBtn("RESET NODE", lv_color_hex(0x666666), x, y, w, h, NodeDetailUI::onResetNodeClicked);
         m_btnResetComm = makeBtn("RESET COMM", lv_color_hex(0x666666), x + (w + gap), y, w, h, NodeDetailUI::onResetCommClicked);
 
-        // Baud config row (device-specific; e.g. Bosch Rexroth ECODRIVE via 0x3FF5).
+        // Baud config row (device-specific; e.g. Bosch Rexroth ECODRIVE via 0x3FEF:07).
         y += h + gap;
         lv_obj_t* lblB = lv_label_create(m_content);
         lv_label_set_text(lblB, "Set Baud:");
