@@ -138,6 +138,10 @@ static uint32_t ecoWriteNextMs = 0;
 static uint8_t ecoWriteNode = 0;
 static uint8_t ecoBaudVal = 0;
 static bool ecoBaudOk = false;
+static bool     ecoCurBaudOk = false;
+static uint32_t ecoCurBaudCode = 0;
+static bool     ecoStatusOk = false;
+static uint16_t ecoStatusWord = 0;
 
 static bool ecodriveBaudValue(uint32_t baud, uint8_t& v) {
     switch (baud) {
@@ -748,9 +752,9 @@ void setup()
         ecoWriteRunning = true;
         ecoWriteStep = 0;
         ecoWriteNextMs = millis();
-        Serial.printf("[ECO] node %u: set baud %lu -> P-0-4079=%u (0x3FF5:07)\n",
+        Serial.printf("[ECO] node %u: DIAGNOSE baud %lu (Code %u) -> read 0x3FF5:07 + status 0x3FF4:07\n",
                       (unsigned)nodeId, (unsigned long)baud, (unsigned)v);
-        nodeUi.setBaudStatus("Lese+schreibe P-0-4079 (0x3FF5:07) ...", true);
+        nodeUi.setBaudStatus("Diagnose: lese Baud-Code + Status ...", true);
     };
 
     ncbs.onSetNodeId = [](uint8_t nodeId, uint8_t newNodeId){
@@ -1065,45 +1069,56 @@ void loop()
     // Bosch Rexroth ECODRIVE baud write sequencer (P-0-4079 @ 0x3FF5:01, then
     // save via 0x1010:01 = "save"). Reuses stdSdo. Power-cycle to apply.
     if (ecoWriteRunning && !stdSdo.isBusy() && (int32_t)(millis() - ecoWriteNextMs) >= 0) {
+        // DIAGNOSTIC ONLY for now: on this EcoDrive Cs the baud value at 0x3FF5:07
+        // read back as 20 @ 250k (does not match the 0..7 index table -> encoding
+        // unclear), and a write was rejected with 0x08000022 (device in phase 4 /
+        // operating mode). Writing a guessed value could move the drive to a baud
+        // our scan can't find. So we only READ the current baud code and the
+        // fieldbus status word (P-0-4078 @ 0x3FF4:07) and decode the phase.
         switch (ecoWriteStep) {
             case 0:
                 ecoWriteStep = 1;
-                // Rexroth maps a parameter (P-0-4079) to a CANopen object whose
-                // subindices are the SERCOS IDN elements: :0=count, :1=ident,
-                // :2=name, :3=attr, :4=unit, :5=min, :6=max, :7=OPERATION DATA.
-                // So the actual value lives at subindex 7. (:0 -> "access not
-                // supported" = read-only count; :1 -> "subindex not present".)
-                // Read it first to confirm and to see the current baud code.
+                ecoCurBaudOk = false;
                 stdSdo.readAsync(0x3FF5, 0x07, [](SdoResult r, uint32_t v){
-                    Serial.printf("[ECO] 0x3FF5:07 (op-data) READ res=%u val=%lu (current baud code)\n",
+                    ecoCurBaudOk = (r == SDO_OK); ecoCurBaudCode = v;
+                    Serial.printf("[ECO] 0x3FF5:07 (P-0-4079 op-data) READ res=%u val=%lu\n",
                                   (unsigned)r, (unsigned long)v);
                 });
                 ecoWriteNextMs = millis() + 60;
                 break;
             case 1:
                 ecoWriteStep = 2;
-                ecoBaudOk = false;
-                // Write the new baud code to the operation-data element (subindex 7),
-                // 2 bytes. If this aborts with 0x06070010 (length), the element is
-                // 4 bytes -> change the size.
-                stdSdo.writeAsync(0x3FF5, 0x07, ecoBaudVal, 2, [](SdoResult r, uint32_t){
-                    ecoBaudOk = (r == SDO_OK);
-                    Serial.printf("[ECO] 0x3FF5:07 (P-0-4079 op-data) WRITE res=%u\n", (unsigned)r);
+                ecoStatusOk = false;
+                // P-0-4078 fieldbus status word (assumed at 0x3FF4:07, i.e. P-4079 - 1).
+                stdSdo.readAsync(0x3FF4, 0x07, [](SdoResult r, uint32_t v){
+                    ecoStatusOk = (r == SDO_OK); ecoStatusWord = (uint16_t)(v & 0xFFFF);
+                    Serial.printf("[ECO] 0x3FF4:07 (P-0-4078 status) READ res=%u val=0x%04X\n",
+                                  (unsigned)r, (unsigned)(v & 0xFFFF));
                 });
                 ecoWriteNextMs = millis() + 60;
                 break;
-            default:
+            default: {
                 ecoWriteRunning = false;
-                lvgl_port_lock(-1);
-                if (ecoBaudOk) {
-                    nodeUi.setBaudStatus("Baud (P-0-4079 :07) gesendet - Power-Cycle & pruefen", true);
-                } else {
-                    nodeUi.setBaudStatus("Baud-Write abgelehnt - siehe Serial-Log", false);
+                const char* phase = "?";
+                if (ecoStatusOk) {
+                    switch (ecoStatusWord & 0x0003) {
+                        case 0x00: phase = "Phase 2 (Parametermodus)"; break;
+                        case 0x01: phase = "Phase 3"; break;
+                        case 0x02: phase = "Phase 4 (Betrieb)"; break;
+                    }
                 }
+                Serial.printf("[ECO] node %u: baud-code=%s%lu  status=%s0x%04X  phase=%s\n",
+                              (unsigned)ecoWriteNode,
+                              ecoCurBaudOk ? "" : "(?)", (unsigned long)ecoCurBaudCode,
+                              ecoStatusOk ? "" : "(?)", (unsigned)ecoStatusWord, phase);
+                char b[64];
+                if (ecoStatusOk) snprintf(b, sizeof(b), "Baud-Code=%lu | %s", (unsigned long)ecoCurBaudCode, phase);
+                else             snprintf(b, sizeof(b), "Baud-Code=%lu | Status n/a", (unsigned long)ecoCurBaudCode);
+                lvgl_port_lock(-1);
+                nodeUi.setBaudStatus(b, true);
                 lvgl_port_unlock();
-                Serial.printf("[ECO] node %u: baud write done (ok=%d). Persistenz ggf. eigener Save-Parameter.\n",
-                              (unsigned)ecoWriteNode, (int)ecoBaudOk);
                 break;
+            }
         }
     }
 
