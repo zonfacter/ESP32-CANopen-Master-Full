@@ -23,6 +23,7 @@ using namespace esp_panel::board;
 // UI
 #include "src/ui/start_menu_ui.h"
 #include "src/ui/node_detail_ui.h"
+#include "src/ui/monitor_ui.h"
 #include "src/ui/siko_ap_ui.h"
 
 // Universal master state machine
@@ -58,8 +59,9 @@ struct Config {
     // CANopen practical baudrates. 10k/20k are intentionally omitted: they need a
     // large TWAI prescaler that some cores/SoCs don't expose, and CANopen devices
     // virtually never run that slow.
+    // Ordered by field frequency (most common first) so typical buses lock fast.
     static constexpr uint32_t SCAN_BAUDS[] = {
-        1000000, 500000, 250000, 125000, 100000, 50000
+        125000, 250000, 500000, 1000000, 100000, 50000
     };
     static constexpr uint8_t SCAN_BAUD_COUNT = sizeof(SCAN_BAUDS) / sizeof(SCAN_BAUDS[0]);
 };
@@ -86,6 +88,9 @@ static uint32_t lastStatusPrint = 0;
 
 static StartMenuUI startUi;
 static NodeDetailUI nodeUi;
+static MonitorUI    monitorUi;
+static bool         monitorActive = false;
+static uint32_t     lastMonitorMs = 0;
 static AP10_UI ap04Ui; // reuse the existing AP10/AP04 UI page as AP04 page
 static CanopenMasterController master(&canDriver);
 
@@ -190,11 +195,18 @@ static void onCanFrame(uint32_t cobId, const uint8_t* data, uint8_t length)
         }
     }
 
-    // Active auto-scan detect: any SDO response (0x581..0x5FF) means a node is
-    // alive at the current baud (passive heartbeat detection still works too).
-    if (scanRunning && cobId >= 0x581 && cobId <= 0x5FF) {
-        const uint8_t nid = (uint8_t)(cobId - 0x580);
-        if (nid >= 1 && nid <= 127) {
+    // Active auto-scan detect: accept ONLY a well-formed SDO response to our
+    // 0x1000 ping (valid SDO command byte + index 0x1000). The previous "any
+    // COB-ID in 0x581..0x5FF" check could lock onto a wrong baud from a stray
+    // frame; requiring the exact response content makes the lock reliable.
+    if (scanRunning && cobId >= 0x581 && cobId <= 0x5A0 && data && length >= 4) {
+        const uint8_t  cmd = data[0];
+        const uint16_t idx = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
+        const bool validSdoResp = (idx == 0x1000) &&
+            (cmd == 0x43 || cmd == 0x4F || cmd == 0x4B || cmd == 0x47 ||
+             cmd == 0x80 || cmd == 0x60);  // read-resp / abort / write-ack
+        if (validSdoResp) {
+            const uint8_t nid = (uint8_t)(cobId - 0x580);
             auto& dn = master.node(nid);
             if (!dn.seen) {
                 Serial.printf("[SCAN] Node %u antwortet @ %lu bps\n",
@@ -363,7 +375,7 @@ static void startAutoBaudScan()
     scanRunning = true;
     scanBaudIdx = 0;
     scanStepStartMs = millis();
-    scanProbeNode = 1;
+    scanProbeNode = 0;          // 0 = NMT broadcast, then 1..32 SDO pings
     scanProbeLastMs = 0;
 
     master.setMode(MasterMode::Scanning);
@@ -394,8 +406,16 @@ static void scanActiveProbe(uint32_t now)
         return;
     }
 
-    uint8_t sdo[8] = { 0x40, 0x00, 0x10, 0x00, 0, 0, 0, 0 };  // read 0x1000:00
-    canDriver.sendFrame(0x600 + scanProbeNode, sdo, 8);
+    if (scanProbeNode == 0) {
+        // Gentle first probe (idea from ESP32-CANopen-Master-Light): an NMT
+        // "Start All Nodes" broadcast makes nodes boot/heartbeat at the correct
+        // baud -> detected passively, without flooding the bus.
+        uint8_t nmt[2] = { 0x01, 0x00 };
+        canDriver.sendFrame(0x000, nmt, 2);
+    } else {
+        uint8_t sdo[8] = { 0x40, 0x00, 0x10, 0x00, 0, 0, 0, 0 };  // read 0x1000:00
+        canDriver.sendFrame(0x600 + scanProbeNode, sdo, 8);
+    }
     scanProbeLastMs = now;
     scanProbeNode++;
 }
@@ -436,7 +456,7 @@ static void scanTick(uint32_t now)
     }
 
     scanStepStartMs = now;
-    scanProbeNode = 1;          // re-sweep nodes 1..32 at the new baud
+    scanProbeNode = 0;          // re-probe (NMT broadcast + nodes 1..32) at the new baud
     scanProbeLastMs = now;
     activeBaud = Config::SCAN_BAUDS[scanBaudIdx];
     Serial.printf("[SCAN] Set baud %lu\n", (unsigned long)activeBaud);
@@ -624,8 +644,32 @@ void setup()
         lvgl_port_unlock();
     };
 
+    cbs.onOpenMonitor = [](){
+        monitorActive = true;
+        if (!snifferEnabled) { snifferEnabled = true; sniffer.setEnabled(true); startUi.setSnifferEnabled(true); }
+        monitorUi.setSnifferUi(snifferEnabled);
+        monitorUi.load();
+        Serial.println("[UI] Monitor opened (sniffer auto-enabled)");
+    };
+
     startUi.setCallbacks(cbs);
     startUi.create();
+
+    // Live CAN monitor screen
+    Monitor_Callbacks mcbs;
+    mcbs.onBack = [](){
+        monitorActive = false;
+        lv_scr_load_anim(startUi.screen(), LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+    };
+    mcbs.onToggleSniffer = [](bool en){
+        snifferEnabled = en;
+        sniffer.setEnabled(en);
+        startUi.setSnifferEnabled(en);
+        Serial.printf("[MONITOR] Sniffer %s\n", en ? "ON" : "OFF");
+    };
+    mcbs.onClear = [](){ sniffer.clearRecent(); Serial.println("[MONITOR] cleared"); };
+    monitorUi.setCallbacks(mcbs);
+    monitorUi.create();
 
     // Node detail callbacks
     NodeDetail_Callbacks ncbs;
@@ -1068,6 +1112,7 @@ void loop()
 
             lvgl_port_lock(-1);
 
+            if (!dunkerUi.created()) {
             Dunker_Callbacks dcbs;
             dcbs.onBack = [](){
                 Serial.println("[UI] Dunker: back to main");
@@ -1097,25 +1142,42 @@ void loop()
             // M6: I/O + brake
             dcbs.onSetOutput = [](uint8_t bit, bool on){ if (dunkerDev) dunkerDev->setOutputBit(bit, on); };
             dcbs.onBrake     = [](bool release){ if (dunkerDev) dunkerDev->setBrake(release); };
-            // Cfg: LSS node-id / baud (selective if the full LSS address incl. serial
-            // is known, else global -- which only safe with a single LSS node on bus)
+            // Cfg: Dunker node-id/baud via manufacturer SDO 0x2000 (LSS is not
+            // supported by this drive -- confirmed on hardware).
+            //   0x2000:01 unlock, :02 node-id, :03 baud index (verified on hardware)
             dcbs.onLssApply  = [](uint8_t newNodeId, uint32_t baud){
-                const auto& dn = master.node(selectedNodeId);
-                bool ok;
-                if (dn.serial != 0) {
-                    Serial.printf("[LSS] Selective cfg node %u -> id=%u baud=%lu\n",
-                                  (unsigned)selectedNodeId, (unsigned)newNodeId, (unsigned long)baud);
-                    ok = lssMaster.configureSelective(dn.vendorId, dn.productCode, dn.revision,
-                                                      dn.serial, newNodeId, baud, true, baud != 0);
-                } else {
-                    Serial.println("[LSS] No serial in identity -> GLOBAL cfg (only safe with ONE LSS node on bus)");
-                    ok = lssMaster.configureGlobal(newNodeId, baud, true, baud != 0);
+                if (!dunkerDev) return;
+                // IMPORTANT ordering: write baud FIRST (device still reachable at
+                // the current node-id), then node-id LAST -- changing the node-id
+                // moves the device's SDO address, so anything after it would target
+                // the wrong address. Node-id is only sent if it actually changes;
+                // its SDO write then "times out" (the drive re-addresses itself),
+                // which is expected, not a failure.
+                bool baudOk = true, sentBaud = false, sentId = false;
+                if (baud != 0) {
+                    uint8_t idx = 0;
+                    if (LssMaster::baudrateToTableSel(baud, idx)) { dunkerDev->cfgBaudSdo(idx); sentBaud = true; }
+                    else baudOk = false;
                 }
-                dunkerUi.setLssStatus(ok ? "LSS gesendet - Geraet pruefen / Power-Cycle"
-                                         : "LSS fehlgeschlagen (keine Antwort)", ok);
+                if (newNodeId != selectedNodeId) { dunkerDev->cfgNodeIdSdo(newNodeId); sentId = true; }
+
+                if (!baudOk) {
+                    dunkerUi.setLssStatus("Baud nicht in der Tabelle.", false);
+                } else if (sentId) {
+                    dunkerUi.setLssStatus("0x2000 gesendet - Power-Cyclen (Node-ID-Timeout ist normal).", true);
+                } else if (sentBaud) {
+                    dunkerUi.setLssStatus("Baud via 0x2000:02 gesendet - Power-Cyclen.", true);
+                } else {
+                    dunkerUi.setLssStatus("Keine Aenderung (Node-ID/Baud unveraendert).", true);
+                }
             };
             dunkerUi.setCallbacks(dcbs);
             dunkerUi.create(selectedNodeId);
+            } else {
+                // Page already built once -> just rebind to this node (avoids
+                // leaking a whole LVGL screen on every connect -> eventual OOM).
+                dunkerUi.setNode(selectedNodeId);
+            }
             dunkerUi.load();
 
             dunkerUiIsActive = true;   // activate RX processing only after full setup
@@ -1136,6 +1198,38 @@ void loop()
             if (dunkerUiIsActive && dunkerDev) dunkerUi.update(dunkerDev->getData());
             lvgl_port_unlock();
         }
+    }
+
+    // Live monitor refresh (build a newest-first log from the sniffer buffer)
+    if (monitorActive && (now - lastMonitorMs >= 150)) {
+        lastMonitorMs = now;
+        std::vector<DecodedFrame> frames = sniffer.getRecentFramesCopy();
+
+        static char logbuf[2048];
+        size_t pos = 0;
+        logbuf[0] = 0;
+        int shown = 0;
+        for (int i = (int)frames.size() - 1; i >= 0 && shown < 28; --i, ++shown) {
+            const DecodedFrame& df = frames[(size_t)i];
+            int w = snprintf(logbuf + pos, sizeof(logbuf) - pos, "0x%03X %-8s N%-3u %u:",
+                             (unsigned)df.raw.id, df.type ? df.type : "",
+                             (unsigned)df.nodeId, (unsigned)df.raw.dlc);
+            if (w < 0 || pos + (size_t)w >= sizeof(logbuf)) break;
+            pos += (size_t)w;
+            for (uint8_t b = 0; b < df.raw.dlc && b < 8; ++b) {
+                w = snprintf(logbuf + pos, sizeof(logbuf) - pos, " %02X", df.raw.data[b]);
+                if (w < 0 || pos + (size_t)w >= sizeof(logbuf)) break;
+                pos += (size_t)w;
+            }
+            w = snprintf(logbuf + pos, sizeof(logbuf) - pos, "\n");
+            if (w < 0 || pos + (size_t)w >= sizeof(logbuf)) break;
+            pos += (size_t)w;
+        }
+        if (pos == 0) snprintf(logbuf, sizeof(logbuf), "(keine Frames - Bus ruhig?)");
+
+        lvgl_port_lock(-1);
+        monitorUi.setLog(logbuf, (uint16_t)frames.size());
+        lvgl_port_unlock();
     }
 
     // Status print (+ sniffer health)

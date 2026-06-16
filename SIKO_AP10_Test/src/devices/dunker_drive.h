@@ -189,6 +189,33 @@ public:
     void halt() { cmdHalt(); }
 
     // -----------------------------------------------------------------------
+    // Dunker manufacturer config via SDO 0x2000. Subindices verified on real
+    // hardware (the BG manual excerpt had :02/:03 the other way round):
+    //   0x2000:01 = 0x6E657277  (Freischaltung / write enable)
+    //   0x2000:02 = node-id
+    //   0x2000:03 = baudrate index (0=1M..8=10k)
+    // -----------------------------------------------------------------------
+    static constexpr uint32_t DUNKER_WREN = 0x6E657277UL;
+
+    // :02/:03 are UNSIGNED32 (1 byte was rejected with abort 0x06070010).
+    static constexpr uint8_t DUNKER_CFG_SIZE = 4;
+
+    void cfgNodeIdSdo(uint8_t newNodeId) {
+        Serial.printf("[DUNKER] Node %u: set node-id via 0x2000:02 -> %u\n",
+                      (unsigned)m_nodeId, (unsigned)newNodeId);
+        qPush(0x2000, 0x01, DUNKER_WREN, 4);                 // unlock (U32)
+        qPush(0x2000, 0x02, newNodeId, DUNKER_CFG_SIZE);     // node-id (subindex 2)
+    }
+
+    // baudIndex: 0=1M, 1=800k, 2=500k, 3=250k, 4=125k, 5=100k, 6=50k, 7=20k, 8=10k
+    void cfgBaudSdo(uint8_t baudIndex) {
+        Serial.printf("[DUNKER] Node %u: set baud index %u via 0x2000:03\n",
+                      (unsigned)m_nodeId, (unsigned)baudIndex);
+        qPush(0x2000, 0x01, DUNKER_WREN, 4);                 // unlock (U32)
+        qPush(0x2000, 0x03, baudIndex, DUNKER_CFG_SIZE);     // baudrate (subindex 3)
+    }
+
+    // -----------------------------------------------------------------------
     // M6: digital I/O + brake
     // -----------------------------------------------------------------------
     // Set/clear one physical output bit (0x60FE:01). Read-modify-write on the
@@ -260,6 +287,12 @@ public:
                 [this, w](SdoResult r, uint32_t){
                     if (r == SDO_OK) {
                         if (w.index == DS402_OBJ::CONTROLWORD) m_data.lastControlword = (uint16_t)w.value;
+                    } else if (w.index == 0x2000 && w.sub != 0x01 && r == SDO_TIMEOUT) {
+                        // The drive applies node-id/baud and re-initialises WITHOUT
+                        // sending an SDO confirmation -> a timeout here is expected.
+                        // The value still takes effect after a power-cycle.
+                        Serial.printf("[DUNKER] 0x2000:%u no SDO confirm (expected; value applies after power-cycle)\n",
+                                      (unsigned)w.sub);
                     } else {
                         Serial.printf("[DUNKER] write 0x%04X:%u failed (%d)\n", w.index, (unsigned)w.sub, (int)r);
                     }

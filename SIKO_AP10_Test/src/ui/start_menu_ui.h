@@ -43,6 +43,7 @@ struct StartMenu_Callbacks {
     // Navigation / actions
     std::function<void(uint8_t nodeId)> onOpenNode = nullptr;
     std::function<void(uint8_t nodeId)> onConnectNode = nullptr;
+    std::function<void()> onOpenMonitor = nullptr;
 };
 
 class StartMenuUI {
@@ -189,24 +190,19 @@ private:
         makeHeader(m_screenStart, "CANopen Master - Start");
 
         // Auto scan
-        makeButton(m_screenStart, 10, 80, 260, 60, 0x007744,
-                   LV_SYMBOL_REFRESH "  Auto-Scan Baud",
+        makeButton(m_screenStart, 10, 80, 250, 60, 0x007744,
+                   LV_SYMBOL_REFRESH "  Auto-Scan",
                    StartMenuUI::onScanAutoClicked);
 
         // Tools nav
-        makeButton(m_screenStart, 290, 80, 220, 60, 0x0066CC,
+        makeButton(m_screenStart, 270, 80, 180, 60, 0x0066CC,
                    LV_SYMBOL_SETTINGS "  TOOLS",
                    StartMenuUI::onOpenToolsClicked);
 
-        // Hint
-        lv_obj_t* hint = lv_label_create(m_screenStart);
-        lv_label_set_text(hint,
-            "Start: Scan oder Node auswaehlen.\n"
-            "Tools: Sniffer, Fix Baud, NMT, Loopback, Ping Scan."
-        );
-        lv_obj_set_style_text_color(hint, lv_color_hex(0xFFBB33), 0);
-        lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
-        lv_obj_set_pos(hint, 530, 82);
+        // Live monitor nav
+        makeButton(m_screenStart, 460, 80, 200, 60, 0x4A2C82,
+                   LV_SYMBOL_EYE_OPEN "  MONITOR",
+                   StartMenuUI::onOpenMonitorClicked);
 
         // Live status line (scan / ping / identify feedback)
         m_lblStatus = lv_label_create(m_screenStart);
@@ -319,6 +315,12 @@ private:
         if (!s_inst) return;
         Serial.println("[UI] Open TOOLS");
         lv_scr_load_anim(s_inst->m_screenTools, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
+    }
+
+    static void onOpenMonitorClicked(lv_event_t*) {
+        if (!s_inst) return;
+        Serial.println("[UI] Open MONITOR");
+        if (s_inst->m_cbs.onOpenMonitor) s_inst->m_cbs.onOpenMonitor();
     }
 
     static void onBackToStartClicked(lv_event_t*) {
