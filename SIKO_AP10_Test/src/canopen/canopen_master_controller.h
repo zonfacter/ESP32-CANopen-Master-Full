@@ -423,8 +423,9 @@ public:
                 Serial.printf("[MASTER] Identify (non-AP04): vendor=0x%08lX product=0x%08lX -> %s\n",
                     (unsigned long)nd.vendorId,
                     (unsigned long)nd.productCode,
-                    (nd.known == KnownDeviceType::Dunker_75CI) ? "Dunker_75CI" :
-                    (nd.known == KnownDeviceType::SIKO_AP10)   ? "SIKO_AP10"   : "Unknown");
+                    (nd.known == KnownDeviceType::Dunker_75CI)           ? "Dunker_75CI" :
+                    (nd.known == KnownDeviceType::SIKO_AP10)             ? "SIKO_AP10"   :
+                    (nd.known == KnownDeviceType::BoschRexroth_ECODRIVE) ? "BoschRexroth_ECODRIVE" : "Unknown");
 
                 // Non-AP04 devices don't need master SYNC (Dunker uses DS402 controlword).
                 m_syncEnabled = false;

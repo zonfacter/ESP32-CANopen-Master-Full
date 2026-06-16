@@ -137,6 +137,8 @@ static uint8_t ecoWriteStep = 0;
 static uint32_t ecoWriteNextMs = 0;
 static uint8_t ecoWriteNode = 0;
 static uint8_t ecoBaudVal = 0;
+static bool ecoBaudOk = false;
+static bool ecoSaveOk = false;
 
 static bool ecodriveBaudValue(uint32_t baud, uint8_t& v) {
     switch (baud) {
@@ -1067,26 +1069,37 @@ void loop()
         switch (ecoWriteStep) {
             case 0:
                 ecoWriteStep = 1;
+                ecoBaudOk = false;
                 // P-0-4079 baudrate value. 2 bytes (U16); if a drive aborts
                 // 0x06070010, change the size to 4.
                 stdSdo.writeAsync(0x3FF5, 0x01, ecoBaudVal, 2, [](SdoResult r, uint32_t){
+                    ecoBaudOk = (r == SDO_OK);
                     Serial.printf("[ECO] 0x3FF5:01 (baud) write res=%u\n", (unsigned)r);
                 });
                 ecoWriteNextMs = millis() + 60;
                 break;
             case 1:
                 ecoWriteStep = 2;
+                ecoSaveOk = false;
                 stdSdo.writeAsync(0x1010, 0x01, 0x65766173UL, 4, [](SdoResult r, uint32_t){
+                    ecoSaveOk = (r == SDO_OK);
                     Serial.printf("[ECO] 0x1010:01 (save) write res=%u\n", (unsigned)r);
                 });
                 ecoWriteNextMs = millis() + 60;
                 break;
             default:
                 ecoWriteRunning = false;
-                Serial.printf("[ECO] node %u: baud config sent - power-cycle the drive\n", (unsigned)ecoWriteNode);
                 lvgl_port_lock(-1);
-                nodeUi.setBaudStatus("Gesendet (0x3FF5 + 0x1010 save). Power-Cycle!", true);
+                if (ecoBaudOk && ecoSaveOk) {
+                    nodeUi.setBaudStatus("Baud gesendet + gespeichert. Power-Cycle!", true);
+                } else if (!ecoBaudOk) {
+                    nodeUi.setBaudStatus("Baud-Objekt 0x3FF5:01 nicht vorhanden (EDS noetig)", false);
+                } else {
+                    nodeUi.setBaudStatus("Baud ok, aber Speichern 0x1010 fehlt (EDS noetig)", false);
+                }
                 lvgl_port_unlock();
+                Serial.printf("[ECO] node %u: done (baudOk=%d saveOk=%d)\n",
+                              (unsigned)ecoWriteNode, (int)ecoBaudOk, (int)ecoSaveOk);
                 break;
         }
     }
