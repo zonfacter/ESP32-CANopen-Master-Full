@@ -138,7 +138,6 @@ static uint32_t ecoWriteNextMs = 0;
 static uint8_t ecoWriteNode = 0;
 static uint8_t ecoBaudVal = 0;
 static bool ecoBaudOk = false;
-static bool ecoSaveOk = false;
 
 static bool ecodriveBaudValue(uint32_t baud, uint8_t& v) {
     switch (baud) {
@@ -749,9 +748,9 @@ void setup()
         ecoWriteRunning = true;
         ecoWriteStep = 0;
         ecoWriteNextMs = millis();
-        Serial.printf("[ECO] node %u: set baud %lu -> P-0-4079=%u (0x3FF5:01) + save\n",
+        Serial.printf("[ECO] node %u: set baud %lu -> P-0-4079=%u (0x3FF5:00)\n",
                       (unsigned)nodeId, (unsigned long)baud, (unsigned)v);
-        nodeUi.setBaudStatus("Sende 0x3FF5 + save 0x1010 ...", true);
+        nodeUi.setBaudStatus("Sende P-0-4079 (0x3FF5:00) ...", true);
     };
 
     ncbs.onSetNodeId = [](uint8_t nodeId, uint8_t newNodeId){
@@ -1070,36 +1069,28 @@ void loop()
             case 0:
                 ecoWriteStep = 1;
                 ecoBaudOk = false;
-                // P-0-4079 baudrate value. 2 bytes (U16); if a drive aborts
-                // 0x06070010, change the size to 4.
-                stdSdo.writeAsync(0x3FF5, 0x01, ecoBaudVal, 2, [](SdoResult r, uint32_t){
+                // P-0-4079 "Fieldbus: Baud rate". Object 0x3FF5 exists (writing :01
+                // returned "subindex not present", not "object not present"). The
+                // FGP20 firmware does not support subindex 1 and puts the value on
+                // subindex 0 (UINT16). The standard store object 0x1010 is absent on
+                // this drive, so we do not write it here.
+                stdSdo.writeAsync(0x3FF5, 0x00, ecoBaudVal, 2, [](SdoResult r, uint32_t){
                     ecoBaudOk = (r == SDO_OK);
-                    Serial.printf("[ECO] 0x3FF5:01 (baud) write res=%u\n", (unsigned)r);
-                });
-                ecoWriteNextMs = millis() + 60;
-                break;
-            case 1:
-                ecoWriteStep = 2;
-                ecoSaveOk = false;
-                stdSdo.writeAsync(0x1010, 0x01, 0x65766173UL, 4, [](SdoResult r, uint32_t){
-                    ecoSaveOk = (r == SDO_OK);
-                    Serial.printf("[ECO] 0x1010:01 (save) write res=%u\n", (unsigned)r);
+                    Serial.printf("[ECO] 0x3FF5:00 (P-0-4079 baud) write res=%u\n", (unsigned)r);
                 });
                 ecoWriteNextMs = millis() + 60;
                 break;
             default:
                 ecoWriteRunning = false;
                 lvgl_port_lock(-1);
-                if (ecoBaudOk && ecoSaveOk) {
-                    nodeUi.setBaudStatus("Baud gesendet + gespeichert. Power-Cycle!", true);
-                } else if (!ecoBaudOk) {
-                    nodeUi.setBaudStatus("Baud-Objekt 0x3FF5:01 nicht vorhanden (EDS noetig)", false);
+                if (ecoBaudOk) {
+                    nodeUi.setBaudStatus("Baud (P-0-4079) gesendet - Power-Cycle & pruefen", true);
                 } else {
-                    nodeUi.setBaudStatus("Baud ok, aber Speichern 0x1010 fehlt (EDS noetig)", false);
+                    nodeUi.setBaudStatus("Baud-Write abgelehnt - siehe Serial-Log", false);
                 }
                 lvgl_port_unlock();
-                Serial.printf("[ECO] node %u: done (baudOk=%d saveOk=%d)\n",
-                              (unsigned)ecoWriteNode, (int)ecoBaudOk, (int)ecoSaveOk);
+                Serial.printf("[ECO] node %u: baud write done (ok=%d). Persistenz ggf. eigener Save-Parameter.\n",
+                              (unsigned)ecoWriteNode, (int)ecoBaudOk);
                 break;
         }
     }
