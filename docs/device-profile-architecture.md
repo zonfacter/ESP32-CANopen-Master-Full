@@ -131,6 +131,109 @@ Useful generic CANopen diagnostics:
 - `0x6041` DS402 statusword, if supported
 - last EMCY frame, if seen by sniffer
 
+## Standard CANopen Profiles
+
+The profile layer should not only support known vendor-specific devices. It should also provide useful fallback profiles for common CANopen standards, so that unknown devices are at least found, identified and shown with basic diagnostics.
+
+### DS301 / CiA 301 Base Profile
+
+Every CANopen device that responds to SDO should get a safe DS301 page.
+
+Minimum discovery:
+
+- SDO ping via `0x1000:00`
+- identity via `0x1018:01..04`
+- device type decode from `0x1000:00`
+- error register via `0x1001:00`
+- predefined error field `0x1003`, if present
+- heartbeat / boot-up observation, if seen
+- EMCY display, if seen by sniffer
+
+Minimum actions:
+
+- NMT Start
+- NMT Pre-Operational
+- NMT Stop
+- Reset Node
+- Reset Communication
+
+No device-specific writes should be attempted for unknown DS301 devices.
+
+### DS402 / CiA 402 Drives
+
+If the device type or object dictionary suggests a drive profile, provide a DS402 diagnostic page even when the vendor is unknown.
+
+Useful probes:
+
+- `0x6040` controlword, read if supported
+- `0x6041` statusword
+- `0x603F` error code
+- `0x6060` modes of operation
+- `0x6061` modes of operation display
+- `0x6064` position actual value, if supported
+
+Safe initial behavior:
+
+- read-only diagnostics by default
+- optional fault reset / state-machine controls only behind an explicit DS402 action profile
+- no motion-related writes for unknown drives
+
+### CiA 401 I/O Modules
+
+CiA 401 devices should be found and displayed even without a vendor-specific profile.
+
+Useful probes:
+
+- device type from `0x1000:00`
+- identity from `0x1018`
+- error register `0x1001`
+- digital inputs, commonly around `0x6000`
+- digital outputs, commonly around `0x6200`, read-only by default
+- analog inputs/outputs, commonly around `0x6401` and related ranges, if present
+
+Safe initial behavior:
+
+- show available input values
+- show output objects as read-only first
+- require an explicit profile or confirmation before writing outputs
+
+### CiA 404 Sensors And Controllers
+
+CiA 404 devices should be detected as sensor/controller class devices and shown with generic diagnostics.
+
+Useful probes:
+
+- device type from `0x1000:00`
+- identity from `0x1018`
+- error register `0x1001`
+- sensor values through profile-specific object ranges where present
+
+Safe initial behavior:
+
+- read-only value display
+- no calibration or controller parameter writes without a vendor-specific profile
+
+### CiA 406 Encoders
+
+CiA 406 encoders should get a simple encoder detail page.
+
+Useful probes:
+
+- device type from `0x1000:00`
+- identity from `0x1018`
+- position value, commonly `0x6004`
+- operating parameters, commonly `0x6000`
+- resolution / measuring units, if present
+- preset value object, if present, read-only by default
+
+Safe initial behavior:
+
+- show actual position
+- show encoder status/diagnostics
+- do not write preset or scaling objects unless a specific profile enables it
+
+These standard profiles should be registered before the final "Unknown CANopen" fallback. Vendor-specific profiles can override them when identity matching is known.
+
 ## RS485 Scanner
 
 RS485 support should be added as a separate scanner rather than mixing it into CANopen code.
@@ -243,11 +346,13 @@ Acceptance:
 
 - replace hard-coded `classifyByIdentity` conditionals with profile match callbacks
 - keep a fallback "Unknown CANopen" profile
+- add standard fallback profiles for DS301, DS402, CiA 401, CiA 404 and CiA 406 based on `0x1000:00` device type and safe object probes
 
 Acceptance:
 
 - Identify All classifies via registry
 - unknown devices still open the standard page
+- common standard devices are at least recognized as drive / I/O / sensor / encoder class when possible
 
 ### Step 3: Capability-Driven Node Detail Actions
 
@@ -293,6 +398,7 @@ Acceptance:
 ## Definition of Done
 
 - New CANopen devices can be added by writing one profile and registering it.
+- Standard CANopen devices using DS301, DS402, CiA 401, CiA 404 or CiA 406 are found by scan and get safe read-only diagnostics where possible.
 - Device detail UI is driven by capabilities, not hard-coded device switches.
 - Existing SIKO, Dunker and Rexroth behavior remains functional.
 - Unknown CANopen devices still get a safe standard page.
