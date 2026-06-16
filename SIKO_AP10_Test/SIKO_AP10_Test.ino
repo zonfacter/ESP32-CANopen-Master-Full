@@ -146,6 +146,7 @@ static bool     ecoCurBaudOk = false;
 static uint32_t ecoCurBaudCode = 0;
 static bool     ecoStatusOk = false;
 static uint16_t ecoStatusWord = 0;
+static uint8_t  ecoPollCount = 0;      // remaining phase-2 status polls after C400
 
 // P-0-4079 is kBaud with 1 decimal -> value = kBaud*10 = baud/100.
 static bool ecodriveBaudValue(uint32_t baud, uint32_t& v) {
@@ -1068,60 +1069,99 @@ void loop()
         }
     }
 
-    // Bosch Rexroth ECODRIVE baud sequencer (P-0-4079 @ 0x3FEF:07; read+status+write, then
-    // save via 0x1010:01 = "save"). Reuses stdSdo. Power-cycle to apply.
+    // Bosch Rexroth ECODRIVE baud STATE MACHINE (objects: P-param -> 0x3000+IDN,
+    // S-param -> 0x2000+IDN, operation data on subindex 7). Beyond the CANopen NMT
+    // state, Rexroth has its own communication phase (2/3/4); P-0-4079 is editable
+    // only in phase 2. We never WRITE the P-0-4077 master control word (drive-enable
+    // / motion risk) -- we only read it for diagnostics -- and request phase 2 via
+    // the documented C400 command (P-0-4023). Hardware drive-enable must be off.
     if (ecoWriteRunning && !stdSdo.isBusy() && (int32_t)(millis() - ecoWriteNextMs) >= 0) {
-        // Correct objects (P-param -> 0x3000+IDN, operation data on subindex 7):
-        //   P-0-4079 baud   -> 0x3FEF:07  (4 byte, value = baud/100, e.g. 5000=500k)
-        //   P-0-4078 status -> 0x3FEE:07  (phase in bits 0,1)
-        // Step 0: read current baud (expect ~2500 @ 250k). Step 1: read status word
-        // and decode the phase. Step 2: write the new baud (only succeeds in phase 2;
-        // a 0x08000022 abort means the drive must be put into parameter mode first).
         switch (ecoWriteStep) {
-            case 0:
+            case 0:  // enter CANopen Pre-Operational (safe; stops PDOs, no enable)
                 ecoWriteStep = 1;
-                // Put the drive into parameter mode automatically: NMT
-                // Pre-Operational (0x000 {0x80, node}). This is the SAFE way to
-                // leave operating mode (phase 4) for SDO config -- it only stops
-                // process data, it does NOT enable the drive. (We never touch the
-                // P-0-4077 control word: that is the master control word
-                // S-0-0134 and would risk drive enable / motion.)
-                {
-                    uint8_t nmt[2] = { 0x80, ecoWriteNode };  // enter Pre-Operational
-                    canDriver.sendFrame(0x000, nmt, 2);
-                    Serial.printf("[ECO] NMT Pre-Operational -> node %u (parameter mode)\n",
-                                  (unsigned)ecoWriteNode);
-                }
-                ecoWriteNextMs = millis() + 300;   // give the drive time to switch
+                { uint8_t nmt[2] = { 0x80, ecoWriteNode }; canDriver.sendFrame(0x000, nmt, 2); }
+                Serial.printf("[ECO] NMT Pre-Operational -> node %u\n", (unsigned)ecoWriteNode);
+                ecoWriteNextMs = millis() + 300;
                 break;
-            case 1:
+            case 1:  // P-0-4084 profile type
                 ecoWriteStep = 2;
+                stdSdo.readAsync(0x3FF4, 0x07, [](SdoResult r, uint32_t v){
+                    Serial.printf("[ECO] P-0-4084 profile (0x3FF4:07) res=%u val=0x%08lX\n", (unsigned)r, (unsigned long)v); });
+                ecoWriteNextMs = millis() + 50;
+                break;
+            case 2:  // P-0-4086 command communication status/config
+                ecoWriteStep = 3;
+                stdSdo.readAsync(0x3FF6, 0x07, [](SdoResult r, uint32_t v){
+                    Serial.printf("[ECO] P-0-4086 cmd-comm (0x3FF6:07) res=%u val=0x%08lX\n", (unsigned)r, (unsigned long)v); });
+                ecoWriteNextMs = millis() + 50;
+                break;
+            case 3:  // P-0-4077 fieldbus control word (READ ONLY - never written)
+                ecoWriteStep = 4;
+                stdSdo.readAsync(0x3FED, 0x07, [](SdoResult r, uint32_t v){
+                    Serial.printf("[ECO] P-0-4077 ctrlword (0x3FED:07) res=%u val=0x%04X (enable bits 14/15=%u)\n",
+                                  (unsigned)r, (unsigned)(v & 0xFFFF), (unsigned)((v >> 14) & 0x3)); });
+                ecoWriteNextMs = millis() + 50;
+                break;
+            case 4:  // S-0-0390 diagnostic message number
+                ecoWriteStep = 5;
+                stdSdo.readAsync(0x2186, 0x07, [](SdoResult r, uint32_t v){
+                    Serial.printf("[ECO] S-0-0390 diag-no (0x2186:07) res=%u val=0x%08lX\n", (unsigned)r, (unsigned long)v); });
+                ecoWriteNextMs = millis() + 50;
+                break;
+            case 5:  // P-0-4079 current baud
+                ecoWriteStep = 6;
                 ecoCurBaudOk = false;
                 stdSdo.readAsync(0x3FEF, 0x07, [](SdoResult r, uint32_t v){
                     ecoCurBaudOk = (r == SDO_OK); ecoCurBaudCode = v;
-                    Serial.printf("[ECO] 0x3FEF:07 (P-0-4079 baud) READ res=%u val=%lu (~kBaud*10)\n",
-                                  (unsigned)r, (unsigned long)v);
-                });
-                ecoWriteNextMs = millis() + 60;
+                    Serial.printf("[ECO] P-0-4079 baud (0x3FEF:07) READ res=%u val=%lu (~kBaud*10)\n", (unsigned)r, (unsigned long)v); });
+                ecoWriteNextMs = millis() + 50;
                 break;
-            case 2:
-                ecoWriteStep = 3;
+            case 6:  // P-0-4078 status word -> phase
+                ecoWriteStep = 7;
                 ecoStatusOk = false;
                 stdSdo.readAsync(0x3FEE, 0x07, [](SdoResult r, uint32_t v){
                     ecoStatusOk = (r == SDO_OK); ecoStatusWord = (uint16_t)(v & 0xFFFF);
-                    Serial.printf("[ECO] 0x3FEE:07 (P-0-4078 status) READ res=%u val=0x%04X\n",
-                                  (unsigned)r, (unsigned)(v & 0xFFFF));
-                });
+                    Serial.printf("[ECO] P-0-4078 status (0x3FEE:07) res=%u val=0x%04X phase=%u\n",
+                                  (unsigned)r, (unsigned)(v & 0xFFFF), (unsigned)(v & 0x3)); });
                 ecoWriteNextMs = millis() + 80;
                 break;
-            case 3:
-                ecoWriteStep = 4;
+            case 7:  // already phase 2? else start C400 (P-0-4023) phase-2 transition
+                if (ecoStatusOk && (ecoStatusWord & 0x0003) == 0x00) {
+                    ecoWriteStep = 11;            // already in parameter mode
+                } else {
+                    stdSdo.writeAsync(0x3FB7, 0x07, 0x0003, 2, [](SdoResult r, uint32_t){
+                        Serial.printf("[ECO] C400 P-0-4023 (0x3FB7:07)=0x0003 start res=%u\n", (unsigned)r); });
+                    ecoPollCount = 5;
+                    ecoWriteStep = 8;
+                }
+                ecoWriteNextMs = millis() + 200;
+                break;
+            case 8:  // poll status during C400
+                ecoWriteStep = 9;
+                stdSdo.readAsync(0x3FEE, 0x07, [](SdoResult r, uint32_t v){
+                    ecoStatusOk = (r == SDO_OK); ecoStatusWord = (uint16_t)(v & 0xFFFF);
+                    Serial.printf("[ECO] C400 poll P-0-4078=0x%04X phase=%u\n", (unsigned)(v & 0xFFFF), (unsigned)(v & 0x3)); });
+                ecoWriteNextMs = millis() + 150;
+                break;
+            case 9:
+                if (ecoStatusOk && (ecoStatusWord & 0x0003) == 0x00) ecoWriteStep = 11;   // reached phase 2
+                else if (--ecoPollCount > 0) ecoWriteStep = 8;                            // keep polling
+                else ecoWriteStep = 11;                                                   // give up -> write anyway to surface the abort+diag
+                ecoWriteNextMs = millis() + 10;
+                break;
+            case 11:  // write the new baud
+                ecoWriteStep = 12;
                 ecoBaudOk = false;
                 stdSdo.writeAsync(0x3FEF, 0x07, ecoBaudVal, 4, [](SdoResult r, uint32_t){
                     ecoBaudOk = (r == SDO_OK);
-                    Serial.printf("[ECO] 0x3FEF:07 (P-0-4079 baud) WRITE res=%u\n", (unsigned)r);
-                });
+                    Serial.printf("[ECO] P-0-4079 baud (0x3FEF:07) WRITE res=%u\n", (unsigned)r); });
                 ecoWriteNextMs = millis() + 80;
+                break;
+            case 12:  // clear the C400 command (harmless if it was never set)
+                ecoWriteStep = 13;
+                stdSdo.writeAsync(0x3FB7, 0x07, 0x0000, 2, [](SdoResult r, uint32_t){
+                    Serial.printf("[ECO] C400 clear (0x3FB7:07)=0 res=%u\n", (unsigned)r); });
+                ecoWriteNextMs = millis() + 60;
                 break;
             default: {
                 ecoWriteRunning = false;
@@ -1133,16 +1173,12 @@ void loop()
                         case 0x02: phase = "Phase4/Betrieb"; break;
                     }
                 }
-                Serial.printf("[ECO] node %u: curBaud=%s%lu status=%s0x%04X phase=%s writeOk=%d\n",
-                              (unsigned)ecoWriteNode,
-                              ecoCurBaudOk ? "" : "(?)", (unsigned long)ecoCurBaudCode,
-                              ecoStatusOk ? "" : "(?)", (unsigned)ecoStatusWord, phase, (int)ecoBaudOk);
+                Serial.printf("[ECO] node %u: DONE curBaud=%s%lu phase=%s writeOk=%d\n",
+                              (unsigned)ecoWriteNode, ecoCurBaudOk ? "" : "(?)",
+                              (unsigned long)ecoCurBaudCode, phase, (int)ecoBaudOk);
                 char b[80];
-                if (ecoBaudOk) {
-                    snprintf(b, sizeof(b), "Baud geschrieben (war %lu) - Power-Cycle!", (unsigned long)ecoCurBaudCode);
-                } else {
-                    snprintf(b, sizeof(b), "Write abgelehnt | %s | ist=%lu", phase, (unsigned long)ecoCurBaudCode);
-                }
+                if (ecoBaudOk) snprintf(b, sizeof(b), "Baud geschrieben (war %lu) - Power-Cycle!", (unsigned long)ecoCurBaudCode);
+                else           snprintf(b, sizeof(b), "Write abgelehnt | %s | ist=%lu (Log!)", phase, (unsigned long)ecoCurBaudCode);
                 lvgl_port_lock(-1);
                 nodeUi.setBaudStatus(b, ecoBaudOk);
                 lvgl_port_unlock();
