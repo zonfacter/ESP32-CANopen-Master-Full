@@ -129,6 +129,28 @@ static uint32_t stdReadNextMs = 0;
 static uint8_t stdErrReg = 0;
 static bool stdErrRegValid = false;
 
+// Bosch Rexroth ECODRIVE baud config (P-0-4079 @ 0x3FF5:01, then save 0x1010:01).
+// Reuses stdSdo. Baud value table differs from CiA 305: 0=auto,1=10k,2=20k,3=50k,
+// 4=125k,5=250k,6=500k,7=1M.
+static bool ecoWriteRunning = false;
+static uint8_t ecoWriteStep = 0;
+static uint32_t ecoWriteNextMs = 0;
+static uint8_t ecoWriteNode = 0;
+static uint8_t ecoBaudVal = 0;
+
+static bool ecodriveBaudValue(uint32_t baud, uint8_t& v) {
+    switch (baud) {
+        case 10000:   v = 1; return true;
+        case 20000:   v = 2; return true;
+        case 50000:   v = 3; return true;
+        case 125000:  v = 4; return true;
+        case 250000:  v = 5; return true;
+        case 500000:  v = 6; return true;
+        case 1000000: v = 7; return true;
+        default:      return false;
+    }
+}
+
 // AP04 page/device state
 static SikoAP04* ap04Dev = nullptr;
 static bool ap04PageLoaded = false;
@@ -304,6 +326,7 @@ static NodeDetail_Info makeNodeInfo(uint8_t nid)
         info.typeText  = (dn.known == KnownDeviceType::SIKO_AP04) ? "SIKO AP04" :
                          (dn.known == KnownDeviceType::SIKO_AP10) ? "SIKO AP10" :
                          (dn.known == KnownDeviceType::Dunker_75CI) ? "Dunker 75CI" :
+                         (dn.known == KnownDeviceType::BoschRexroth_ECODRIVE) ? "Bosch ECODRIVE" :
                          "Unknown";
     }
 
@@ -341,6 +364,7 @@ static void refreshStartMenuList()
             case KnownDeviceType::SIKO_AP04:  rows[n].typeText = "SIKO AP04"; break;
             case KnownDeviceType::SIKO_AP10:  rows[n].typeText = "SIKO AP10"; break;
             case KnownDeviceType::Dunker_75CI:rows[n].typeText = "Dunker 75CI"; break;
+            case KnownDeviceType::BoschRexroth_ECODRIVE: rows[n].typeText = "Bosch ECODRIVE"; break;
             default:                          rows[n].typeText = "Unknown"; break;
         }
 
@@ -705,6 +729,29 @@ void setup()
         Serial.printf("[STD] Read 1018h+1001h for node %u\n", (unsigned)nodeId);
     };
 
+    // Set baudrate - device-specific. Bosch Rexroth ECODRIVE: P-0-4079 @ 0x3FF5:01
+    // (own value table) + save 0x1010:01, then power-cycle.
+    ncbs.onSetBaud = [](uint8_t nodeId, uint32_t baud){
+        const auto& dn = master.node(nodeId);
+        if (dn.known != KnownDeviceType::BoschRexroth_ECODRIVE) {
+            nodeUi.setBaudStatus("Baud-Setzen fuer diesen Typ (noch) nicht hinterlegt", false);
+            return;
+        }
+        uint8_t v = 0;
+        if (!ecodriveBaudValue(baud, v)) { nodeUi.setBaudStatus("Baud nicht unterstuetzt", false); return; }
+        if (ecoWriteRunning || stdReadRunning || stdSdo.isBusy()) { nodeUi.setBaudStatus("SDO busy - kurz warten", false); return; }
+        ecoWriteNode = nodeId;
+        ecoBaudVal   = v;
+        stdSdo.setNodeId(nodeId);
+        stdSdo.setTimeout(600);
+        ecoWriteRunning = true;
+        ecoWriteStep = 0;
+        ecoWriteNextMs = millis();
+        Serial.printf("[ECO] node %u: set baud %lu -> P-0-4079=%u (0x3FF5:01) + save\n",
+                      (unsigned)nodeId, (unsigned long)baud, (unsigned)v);
+        nodeUi.setBaudStatus("Sende 0x3FF5 + save 0x1010 ...", true);
+    };
+
     ncbs.onSetNodeId = [](uint8_t nodeId, uint8_t newNodeId){
         Serial.printf("[UI] SET NODE-ID node=%u -> %u\n", (unsigned)nodeId, (unsigned)newNodeId);
         if (master.mode() == MasterMode::Idle || master.mode() == MasterMode::Scanning) {
@@ -908,7 +955,8 @@ void loop()
                 const char* typeStr =
                     (dn.known == KnownDeviceType::SIKO_AP04)   ? "SIKO AP04"   :
                     (dn.known == KnownDeviceType::SIKO_AP10)   ? "SIKO AP10"   :
-                    (dn.known == KnownDeviceType::Dunker_75CI) ? "Dunker 75CI" : "Unknown";
+                    (dn.known == KnownDeviceType::Dunker_75CI) ? "Dunker 75CI" :
+                    (dn.known == KnownDeviceType::BoschRexroth_ECODRIVE) ? "Bosch ECODRIVE" : "Unknown";
 
                 Serial.printf("[IDENT-ALL] Node %u: vendor=0x%08lX product=0x%08lX rev=0x%08lX serial=0x%08lX -> %s\n",
                               (unsigned)identifyAllNode,
@@ -1010,6 +1058,36 @@ void loop()
                 lvgl_port_unlock();
                 break;
             }
+        }
+    }
+
+    // Bosch Rexroth ECODRIVE baud write sequencer (P-0-4079 @ 0x3FF5:01, then
+    // save via 0x1010:01 = "save"). Reuses stdSdo. Power-cycle to apply.
+    if (ecoWriteRunning && !stdSdo.isBusy() && (int32_t)(millis() - ecoWriteNextMs) >= 0) {
+        switch (ecoWriteStep) {
+            case 0:
+                ecoWriteStep = 1;
+                // P-0-4079 baudrate value. 2 bytes (U16); if a drive aborts
+                // 0x06070010, change the size to 4.
+                stdSdo.writeAsync(0x3FF5, 0x01, ecoBaudVal, 2, [](SdoResult r, uint32_t){
+                    Serial.printf("[ECO] 0x3FF5:01 (baud) write res=%u\n", (unsigned)r);
+                });
+                ecoWriteNextMs = millis() + 60;
+                break;
+            case 1:
+                ecoWriteStep = 2;
+                stdSdo.writeAsync(0x1010, 0x01, 0x65766173UL, 4, [](SdoResult r, uint32_t){
+                    Serial.printf("[ECO] 0x1010:01 (save) write res=%u\n", (unsigned)r);
+                });
+                ecoWriteNextMs = millis() + 60;
+                break;
+            default:
+                ecoWriteRunning = false;
+                Serial.printf("[ECO] node %u: baud config sent - power-cycle the drive\n", (unsigned)ecoWriteNode);
+                lvgl_port_lock(-1);
+                nodeUi.setBaudStatus("Gesendet (0x3FF5 + 0x1010 save). Power-Cycle!", true);
+                lvgl_port_unlock();
+                break;
         }
     }
 

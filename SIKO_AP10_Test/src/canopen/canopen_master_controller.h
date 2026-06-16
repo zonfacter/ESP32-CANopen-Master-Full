@@ -55,6 +55,7 @@ enum class KnownDeviceType : uint8_t {
     SIKO_AP04,
     SIKO_AP10,
     Dunker_75CI,
+    BoschRexroth_ECODRIVE,
 };
 
 // Simple classifier placeholder.
@@ -85,6 +86,10 @@ static inline KnownDeviceType classifyByIdentity(uint32_t vendorId, uint32_t pro
     // distinguish individual drive models.
     if (vendorId == 0x00000257UL) {
         return KnownDeviceType::Dunker_75CI;
+    }
+    // Bosch Rexroth (Indramat) vendor-id = 0x00000024 -> ECODRIVE03 etc.
+    if (vendorId == 0x00000024UL) {
+        return KnownDeviceType::BoschRexroth_ECODRIVE;
     }
     // Unknown vendor -> stay honest.
     return KnownDeviceType::Unknown;
