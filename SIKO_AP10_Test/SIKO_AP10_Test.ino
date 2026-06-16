@@ -748,9 +748,9 @@ void setup()
         ecoWriteRunning = true;
         ecoWriteStep = 0;
         ecoWriteNextMs = millis();
-        Serial.printf("[ECO] node %u: set baud %lu -> P-0-4079=%u (0x3FF5:00)\n",
+        Serial.printf("[ECO] node %u: set baud %lu -> P-0-4079=%u (0x3FF5:07)\n",
                       (unsigned)nodeId, (unsigned long)baud, (unsigned)v);
-        nodeUi.setBaudStatus("Sende P-0-4079 (0x3FF5:00) ...", true);
+        nodeUi.setBaudStatus("Lese+schreibe P-0-4079 (0x3FF5:07) ...", true);
     };
 
     ncbs.onSetNodeId = [](uint8_t nodeId, uint8_t newNodeId){
@@ -1068,15 +1068,27 @@ void loop()
         switch (ecoWriteStep) {
             case 0:
                 ecoWriteStep = 1;
+                // Rexroth maps a parameter (P-0-4079) to a CANopen object whose
+                // subindices are the SERCOS IDN elements: :0=count, :1=ident,
+                // :2=name, :3=attr, :4=unit, :5=min, :6=max, :7=OPERATION DATA.
+                // So the actual value lives at subindex 7. (:0 -> "access not
+                // supported" = read-only count; :1 -> "subindex not present".)
+                // Read it first to confirm and to see the current baud code.
+                stdSdo.readAsync(0x3FF5, 0x07, [](SdoResult r, uint32_t v){
+                    Serial.printf("[ECO] 0x3FF5:07 (op-data) READ res=%u val=%lu (current baud code)\n",
+                                  (unsigned)r, (unsigned long)v);
+                });
+                ecoWriteNextMs = millis() + 60;
+                break;
+            case 1:
+                ecoWriteStep = 2;
                 ecoBaudOk = false;
-                // P-0-4079 "Fieldbus: Baud rate". Object 0x3FF5 exists (writing :01
-                // returned "subindex not present", not "object not present"). The
-                // FGP20 firmware does not support subindex 1 and puts the value on
-                // subindex 0 (UINT16). The standard store object 0x1010 is absent on
-                // this drive, so we do not write it here.
-                stdSdo.writeAsync(0x3FF5, 0x00, ecoBaudVal, 2, [](SdoResult r, uint32_t){
+                // Write the new baud code to the operation-data element (subindex 7),
+                // 2 bytes. If this aborts with 0x06070010 (length), the element is
+                // 4 bytes -> change the size.
+                stdSdo.writeAsync(0x3FF5, 0x07, ecoBaudVal, 2, [](SdoResult r, uint32_t){
                     ecoBaudOk = (r == SDO_OK);
-                    Serial.printf("[ECO] 0x3FF5:00 (P-0-4079 baud) write res=%u\n", (unsigned)r);
+                    Serial.printf("[ECO] 0x3FF5:07 (P-0-4079 op-data) WRITE res=%u\n", (unsigned)r);
                 });
                 ecoWriteNextMs = millis() + 60;
                 break;
@@ -1084,7 +1096,7 @@ void loop()
                 ecoWriteRunning = false;
                 lvgl_port_lock(-1);
                 if (ecoBaudOk) {
-                    nodeUi.setBaudStatus("Baud (P-0-4079) gesendet - Power-Cycle & pruefen", true);
+                    nodeUi.setBaudStatus("Baud (P-0-4079 :07) gesendet - Power-Cycle & pruefen", true);
                 } else {
                     nodeUi.setBaudStatus("Baud-Write abgelehnt - siehe Serial-Log", false);
                 }
