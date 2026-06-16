@@ -129,30 +129,32 @@ static uint32_t stdReadNextMs = 0;
 static uint8_t stdErrReg = 0;
 static bool stdErrRegValid = false;
 
-// Bosch Rexroth ECODRIVE baud config (P-0-4079 @ 0x3FF5:01, then save 0x1010:01).
-// Reuses stdSdo. Baud value table differs from CiA 305: 0=auto,1=10k,2=20k,3=50k,
-// 4=125k,5=250k,6=500k,7=1M.
+// Bosch Rexroth ECODRIVE baud config.
+// Rexroth maps drive parameters to CANopen objects: P-params -> index 0x3000+IDN,
+// operation data on subindex 7. So:
+//   P-0-4079 "Fieldbus: Baud rate"   -> 0x3FEF:07  (4 byte, unit kBaud x 0.1,
+//                                       i.e. value = baud/100; 500k -> 5000;
+//                                       editable only in phase 2, stored in EEPROM)
+//   P-0-4078 "Fieldbus status word"  -> 0x3FEE:07  (phase in bits 0,1)
 static bool ecoWriteRunning = false;
 static uint8_t ecoWriteStep = 0;
 static uint32_t ecoWriteNextMs = 0;
 static uint8_t ecoWriteNode = 0;
-static uint8_t ecoBaudVal = 0;
+static uint32_t ecoBaudVal = 0;        // value to write = baud/100 (kBaud x10)
 static bool ecoBaudOk = false;
 static bool     ecoCurBaudOk = false;
 static uint32_t ecoCurBaudCode = 0;
 static bool     ecoStatusOk = false;
 static uint16_t ecoStatusWord = 0;
 
-static bool ecodriveBaudValue(uint32_t baud, uint8_t& v) {
+// P-0-4079 is kBaud with 1 decimal -> value = kBaud*10 = baud/100.
+static bool ecodriveBaudValue(uint32_t baud, uint32_t& v) {
     switch (baud) {
-        case 10000:   v = 1; return true;
-        case 20000:   v = 2; return true;
-        case 50000:   v = 3; return true;
-        case 125000:  v = 4; return true;
-        case 250000:  v = 5; return true;
-        case 500000:  v = 6; return true;
-        case 1000000: v = 7; return true;
-        default:      return false;
+        case 50000: case 100000: case 125000:
+        case 250000: case 500000: case 1000000:
+            v = baud / 100; return true;   // e.g. 500000 -> 5000
+        default:
+            return false;
     }
 }
 
@@ -742,7 +744,7 @@ void setup()
             nodeUi.setBaudStatus("Baud-Setzen fuer diesen Typ (noch) nicht hinterlegt", false);
             return;
         }
-        uint8_t v = 0;
+        uint32_t v = 0;
         if (!ecodriveBaudValue(baud, v)) { nodeUi.setBaudStatus("Baud nicht unterstuetzt", false); return; }
         if (ecoWriteRunning || stdReadRunning || stdSdo.isBusy()) { nodeUi.setBaudStatus("SDO busy - kurz warten", false); return; }
         ecoWriteNode = nodeId;
@@ -752,9 +754,9 @@ void setup()
         ecoWriteRunning = true;
         ecoWriteStep = 0;
         ecoWriteNextMs = millis();
-        Serial.printf("[ECO] node %u: DIAGNOSE baud %lu (Code %u) -> read 0x3FF5:07 + status 0x3FF4:07\n",
-                      (unsigned)nodeId, (unsigned long)baud, (unsigned)v);
-        nodeUi.setBaudStatus("Diagnose: lese Baud-Code + Status ...", true);
+        Serial.printf("[ECO] node %u: set baud %lu -> P-0-4079=%lu (0x3FEF:07, 4B)\n",
+                      (unsigned)nodeId, (unsigned long)baud, (unsigned long)v);
+        nodeUi.setBaudStatus("P-0-4079 (0x3FEF:07) lesen + schreiben ...", true);
     };
 
     ncbs.onSetNodeId = [](uint8_t nodeId, uint8_t newNodeId){
@@ -1069,19 +1071,19 @@ void loop()
     // Bosch Rexroth ECODRIVE baud write sequencer (P-0-4079 @ 0x3FF5:01, then
     // save via 0x1010:01 = "save"). Reuses stdSdo. Power-cycle to apply.
     if (ecoWriteRunning && !stdSdo.isBusy() && (int32_t)(millis() - ecoWriteNextMs) >= 0) {
-        // DIAGNOSTIC ONLY for now: on this EcoDrive Cs the baud value at 0x3FF5:07
-        // read back as 20 @ 250k (does not match the 0..7 index table -> encoding
-        // unclear), and a write was rejected with 0x08000022 (device in phase 4 /
-        // operating mode). Writing a guessed value could move the drive to a baud
-        // our scan can't find. So we only READ the current baud code and the
-        // fieldbus status word (P-0-4078 @ 0x3FF4:07) and decode the phase.
+        // Correct objects (P-param -> 0x3000+IDN, operation data on subindex 7):
+        //   P-0-4079 baud   -> 0x3FEF:07  (4 byte, value = baud/100, e.g. 5000=500k)
+        //   P-0-4078 status -> 0x3FEE:07  (phase in bits 0,1)
+        // Step 0: read current baud (expect ~2500 @ 250k). Step 1: read status word
+        // and decode the phase. Step 2: write the new baud (only succeeds in phase 2;
+        // a 0x08000022 abort means the drive must be put into parameter mode first).
         switch (ecoWriteStep) {
             case 0:
                 ecoWriteStep = 1;
                 ecoCurBaudOk = false;
-                stdSdo.readAsync(0x3FF5, 0x07, [](SdoResult r, uint32_t v){
+                stdSdo.readAsync(0x3FEF, 0x07, [](SdoResult r, uint32_t v){
                     ecoCurBaudOk = (r == SDO_OK); ecoCurBaudCode = v;
-                    Serial.printf("[ECO] 0x3FF5:07 (P-0-4079 op-data) READ res=%u val=%lu\n",
+                    Serial.printf("[ECO] 0x3FEF:07 (P-0-4079 baud) READ res=%u val=%lu (~kBaud*10)\n",
                                   (unsigned)r, (unsigned long)v);
                 });
                 ecoWriteNextMs = millis() + 60;
@@ -1089,33 +1091,44 @@ void loop()
             case 1:
                 ecoWriteStep = 2;
                 ecoStatusOk = false;
-                // P-0-4078 fieldbus status word (assumed at 0x3FF4:07, i.e. P-4079 - 1).
-                stdSdo.readAsync(0x3FF4, 0x07, [](SdoResult r, uint32_t v){
+                stdSdo.readAsync(0x3FEE, 0x07, [](SdoResult r, uint32_t v){
                     ecoStatusOk = (r == SDO_OK); ecoStatusWord = (uint16_t)(v & 0xFFFF);
-                    Serial.printf("[ECO] 0x3FF4:07 (P-0-4078 status) READ res=%u val=0x%04X\n",
+                    Serial.printf("[ECO] 0x3FEE:07 (P-0-4078 status) READ res=%u val=0x%04X\n",
                                   (unsigned)r, (unsigned)(v & 0xFFFF));
                 });
-                ecoWriteNextMs = millis() + 60;
+                ecoWriteNextMs = millis() + 80;
+                break;
+            case 2:
+                ecoWriteStep = 3;
+                ecoBaudOk = false;
+                stdSdo.writeAsync(0x3FEF, 0x07, ecoBaudVal, 4, [](SdoResult r, uint32_t){
+                    ecoBaudOk = (r == SDO_OK);
+                    Serial.printf("[ECO] 0x3FEF:07 (P-0-4079 baud) WRITE res=%u\n", (unsigned)r);
+                });
+                ecoWriteNextMs = millis() + 80;
                 break;
             default: {
                 ecoWriteRunning = false;
                 const char* phase = "?";
                 if (ecoStatusOk) {
                     switch (ecoStatusWord & 0x0003) {
-                        case 0x00: phase = "Phase 2 (Parametermodus)"; break;
-                        case 0x01: phase = "Phase 3"; break;
-                        case 0x02: phase = "Phase 4 (Betrieb)"; break;
+                        case 0x00: phase = "Phase2/Param"; break;
+                        case 0x01: phase = "Phase3"; break;
+                        case 0x02: phase = "Phase4/Betrieb"; break;
                     }
                 }
-                Serial.printf("[ECO] node %u: baud-code=%s%lu  status=%s0x%04X  phase=%s\n",
+                Serial.printf("[ECO] node %u: curBaud=%s%lu status=%s0x%04X phase=%s writeOk=%d\n",
                               (unsigned)ecoWriteNode,
                               ecoCurBaudOk ? "" : "(?)", (unsigned long)ecoCurBaudCode,
-                              ecoStatusOk ? "" : "(?)", (unsigned)ecoStatusWord, phase);
-                char b[64];
-                if (ecoStatusOk) snprintf(b, sizeof(b), "Baud-Code=%lu | %s", (unsigned long)ecoCurBaudCode, phase);
-                else             snprintf(b, sizeof(b), "Baud-Code=%lu | Status n/a", (unsigned long)ecoCurBaudCode);
+                              ecoStatusOk ? "" : "(?)", (unsigned)ecoStatusWord, phase, (int)ecoBaudOk);
+                char b[80];
+                if (ecoBaudOk) {
+                    snprintf(b, sizeof(b), "Baud geschrieben (war %lu) - Power-Cycle!", (unsigned long)ecoCurBaudCode);
+                } else {
+                    snprintf(b, sizeof(b), "Write abgelehnt | %s | ist=%lu", phase, (unsigned long)ecoCurBaudCode);
+                }
                 lvgl_port_lock(-1);
-                nodeUi.setBaudStatus(b, true);
+                nodeUi.setBaudStatus(b, ecoBaudOk);
                 lvgl_port_unlock();
                 break;
             }
