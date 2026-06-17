@@ -351,7 +351,31 @@ public:
         lv_label_set_text(m_lblBaudStatus, text ? text : "");
         lv_obj_set_style_text_color(m_lblBaudStatus, lv_color_hex(ok ? 0x33DD66 : 0xFF6666), 0);
     }
+
+    // Prominent confirmation that the baud write succeeded and a power-cycle is
+    // required. baudKbps = new rate in kBit/s (for the message), 0 = omit.
+    void showBaudWrittenMsg(uint32_t baudKbps) {
+        static const char* btns[] = { "OK", "" };
+        char txt[200];
+        if (baudKbps)
+            snprintf(txt, sizeof(txt),
+                     "Neue Baudrate %lu kBit/s erfolgreich geschrieben.\n\n"
+                     "Bitte den Antrieb AUS- und wieder EINSCHALTEN\n"
+                     "(Power-Cycle), damit die Aenderung aktiv wird.",
+                     (unsigned long)baudKbps);
+        else
+            snprintf(txt, sizeof(txt),
+                     "Baudrate erfolgreich geschrieben.\n\n"
+                     "Bitte den Antrieb AUS- und wieder EINSCHALTEN (Power-Cycle).");
+        lv_obj_t* mbox = lv_msgbox_create(nullptr, LV_SYMBOL_OK "  Baudrate gesetzt", txt, btns, false);
+        lv_obj_center(mbox);
+        lv_obj_add_event_cb(mbox, NodeDetailUI::onMsgBoxOk, LV_EVENT_VALUE_CHANGED, nullptr);
+    }
 private:
+    static void onMsgBoxOk(lv_event_t* e) {
+        lv_msgbox_close(lv_event_get_current_target(e));
+    }
+
 
     // Render the product-code as ASCII if its bytes are printable (e.g. AP04 = "CAN").
     static void productAscii(uint32_t pc, char* out, size_t n) {

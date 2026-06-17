@@ -1223,6 +1223,7 @@ void loop()
                 else                  snprintf(b, sizeof(b), "Write in Phase2 abgelehnt | ist=%lu (Log!)", (unsigned long)ecoCurBaudCode);
                 lvgl_port_lock(-1);
                 nodeUi.setBaudStatus(b, ecoBaudOk);
+                if (ecoBaudOk) nodeUi.showBaudWrittenMsg((uint32_t)(ecoBaudVal / 10));  // kBaud*10 -> kBit/s
                 lvgl_port_unlock();
                 break;
             }
