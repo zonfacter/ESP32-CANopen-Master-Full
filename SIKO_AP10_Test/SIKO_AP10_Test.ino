@@ -1511,7 +1511,16 @@ void loop()
         if (!navPendingDisconnect && !navPendingUiSwitch && !ap04PendingReconnect) {
             lvgl_port_lock(-1);
             refreshNodeDetail();
-            if (ap04UiIsActive) refreshAp04();
+            if (ap04UiIsActive) {
+                refreshAp04();
+                AP10UI_CanStats stats;
+                stats.rxCount = canDriver.rxCount();
+                stats.txCount = canDriver.txCount();
+                stats.errCount = canDriver.errCount();
+                stats.recoveryCount = canDriver.recoveryCount();
+                stats.pdoCount = ap04Dev ? ap04Dev->getData().updateCount : 0;
+                ap04Ui.updateCanStats(stats);
+            }
             if (dunkerUiIsActive && dunkerDev) dunkerUi.update(dunkerDev->getData());
             lvgl_port_unlock();
         }
@@ -1553,13 +1562,14 @@ void loop()
     if (now - lastStatusPrint >= Config::STATUS_PRINT_MS) {
         lastStatusPrint = now;
 
-        Serial.printf("[STATUS] mode=%u baud=%lu scan=%s sniffer=%s drops=%lu age=%lu ms\n",
+        Serial.printf("[STATUS] mode=%u baud=%lu scan=%s sniffer=%s drops=%lu age=%lu ms recoveries=%lu\n",
                       (unsigned)master.mode(),
                       (unsigned long)activeBaud,
                       scanRunning ? "RUN" : "STOP",
                       snifferEnabled ? "ON" : "OFF",
                       (unsigned long)sniffer.getDroppedCount(),
-                      (unsigned long)sniffer.getLastTrafficAgeMs());
+                      (unsigned long)sniffer.getLastTrafficAgeMs(),
+                      (unsigned long)canDriver.recoveryCount());
     }
 
     // Phase B UI integration will toggle snifferEnabled.
