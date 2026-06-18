@@ -67,6 +67,8 @@ public:
     uint32_t getDroppedCount() const { return _droppedCount; }
     uint32_t getLastFrameTimeMs() const { return _lastFrameTimeMs; }
     uint32_t getLastTrafficAgeMs() const;
+    uint16_t getQueueDepth() const;
+    uint16_t getQueueHighWatermark() const { return _queueHighWatermark; }
 
     // UI access (copy out)
     std::vector<DecodedFrame> getRecentFramesCopy();
@@ -104,6 +106,7 @@ private:
     // health
     volatile uint32_t _droppedCount = 0;
     volatile uint32_t _lastFrameTimeMs = 0;
+    volatile uint16_t _queueHighWatermark = 0;
 
     // recent frames: fixed-size circular buffer, copied out as oldest->newest
     std::vector<DecodedFrame> _recentRing;

@@ -63,6 +63,7 @@ void SnifferManager::setEnabled(bool en)
     if (en) {
         if (_q) xQueueReset(_q);
         _lastFrameTimeMs = 0;
+        _queueHighWatermark = 0;
         _enabled = true;
     } else {
         _enabled = false;
@@ -88,6 +89,11 @@ void SnifferManager::processFrame(uint32_t id, uint8_t dlc, const uint8_t* data,
     // Non-blocking enqueue
     if (xQueueSend(_q, &f, 0) != pdTRUE) {
         _droppedCount++;
+    } else {
+        const UBaseType_t waiting = uxQueueMessagesWaiting(_q);
+        if (waiting > _queueHighWatermark) {
+            _queueHighWatermark = (uint16_t)waiting;
+        }
     }
 }
 
@@ -96,6 +102,12 @@ uint32_t SnifferManager::getLastTrafficAgeMs() const
     const uint32_t last = _lastFrameTimeMs;
     if (last == 0) return 0xFFFFFFFFu;
     return (uint32_t)(millis() - last);
+}
+
+uint16_t SnifferManager::getQueueDepth() const
+{
+    if (!_q) return 0;
+    return (uint16_t)uxQueueMessagesWaiting(_q);
 }
 
 std::vector<DecodedFrame> SnifferManager::getRecentFramesCopy()
@@ -147,6 +159,7 @@ void SnifferManager::clearStats()
 {
     _droppedCount = 0;
     _lastFrameTimeMs = 0;
+    _queueHighWatermark = getQueueDepth();
 }
 
 void SnifferManager::setNodeIdFilter(uint8_t nodeIdOr0)

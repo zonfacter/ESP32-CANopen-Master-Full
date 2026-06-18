@@ -1560,7 +1560,12 @@ void loop()
         if (pos == 0) snprintf(logbuf, sizeof(logbuf), "(keine Frames - Bus ruhig?)");
 
         lvgl_port_lock(-1);
-        monitorUi.setLog(logbuf, totalFrames, sniffer.getDroppedCount(), sniffer.getLastTrafficAgeMs());
+        monitorUi.setLog(logbuf,
+                         totalFrames,
+                         sniffer.getDroppedCount(),
+                         sniffer.getLastTrafficAgeMs(),
+                         sniffer.getQueueDepth(),
+                         sniffer.getQueueHighWatermark());
         lvgl_port_unlock();
     }
 
@@ -1568,13 +1573,15 @@ void loop()
     if (now - lastStatusPrint >= Config::STATUS_PRINT_MS) {
         lastStatusPrint = now;
 
-        Serial.printf("[STATUS] mode=%u baud=%lu bus=%s scan=%s sniffer=%s drops=%lu age=%lu ms recoveries=%lu\n",
+        Serial.printf("[STATUS] mode=%u baud=%lu bus=%s scan=%s sniffer=%s drops=%lu q=%u/%u age=%lu ms recoveries=%lu\n",
                       (unsigned)master.mode(),
                       (unsigned long)activeBaud,
                       canDriver.stateText(),
                       scanRunning ? "RUN" : "STOP",
                       snifferEnabled ? "ON" : "OFF",
                       (unsigned long)sniffer.getDroppedCount(),
+                      (unsigned)sniffer.getQueueDepth(),
+                      (unsigned)sniffer.getQueueHighWatermark(),
                       (unsigned long)sniffer.getLastTrafficAgeMs(),
                       (unsigned long)canDriver.recoveryCount());
     }

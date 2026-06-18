@@ -111,16 +111,24 @@ public:
         if (m_screen) lv_scr_load_anim(m_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
     }
 
-    void setLog(const char* text, uint16_t count, uint32_t drops = 0, uint32_t ageMs = 0xFFFFFFFFu) {
+    void setLog(const char* text,
+                uint16_t count,
+                uint32_t drops = 0,
+                uint32_t ageMs = 0xFFFFFFFFu,
+                uint16_t queueDepth = 0,
+                uint16_t queueHigh = 0) {
         if (m_lblLog && text) lv_label_set_text(m_lblLog, text);
         if (m_lblCount) {
-            char b[64];
+            char b[96];
             if (ageMs == 0xFFFFFFFFu) {
-                snprintf(b, sizeof(b), "%u Frames | Drops %lu | Age ---",
-                         (unsigned)count, (unsigned long)drops);
+                snprintf(b, sizeof(b), "%u Frames | Drops %lu | Q %u/%u | Age ---",
+                         (unsigned)count, (unsigned long)drops,
+                         (unsigned)queueDepth, (unsigned)queueHigh);
             } else {
-                snprintf(b, sizeof(b), "%u Frames | Drops %lu | Age %lu ms",
-                         (unsigned)count, (unsigned long)drops, (unsigned long)ageMs);
+                snprintf(b, sizeof(b), "%u Frames | Drops %lu | Q %u/%u | Age %lu ms",
+                         (unsigned)count, (unsigned long)drops,
+                         (unsigned)queueDepth, (unsigned)queueHigh,
+                         (unsigned long)ageMs);
             }
             lv_label_set_text(m_lblCount, b);
         }
