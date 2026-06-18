@@ -737,7 +737,11 @@ void setup()
         startUi.setSnifferEnabled(en);
         Serial.printf("[MONITOR] Sniffer %s\n", en ? "ON" : "OFF");
     };
-    mcbs.onClear = [](){ sniffer.clearRecent(); Serial.println("[MONITOR] cleared"); };
+    mcbs.onClear = [](){
+        sniffer.clearRecent();
+        sniffer.clearStats();
+        Serial.println("[MONITOR] cleared");
+    };
     monitorUi.setCallbacks(mcbs);
     monitorUi.create();
 

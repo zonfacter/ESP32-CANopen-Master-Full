@@ -143,6 +143,12 @@ void SnifferManager::clearRecent()
     portEXIT_CRITICAL(&_recentMux);
 }
 
+void SnifferManager::clearStats()
+{
+    _droppedCount = 0;
+    _lastFrameTimeMs = 0;
+}
+
 void SnifferManager::setNodeIdFilter(uint8_t nodeIdOr0)
 {
     _nodeIdFilter = nodeIdOr0;

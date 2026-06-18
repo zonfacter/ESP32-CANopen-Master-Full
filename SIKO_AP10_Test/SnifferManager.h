@@ -72,6 +72,7 @@ public:
     std::vector<DecodedFrame> getRecentFramesCopy();
     uint16_t copyRecentNewest(DecodedFrame* out, uint16_t maxOut, uint16_t* totalAvailable = nullptr);
     void clearRecent();
+    void clearStats();
 
     // Filters (applied in decode/task stage)
     void setNodeIdFilter(uint8_t nodeIdOr0);
