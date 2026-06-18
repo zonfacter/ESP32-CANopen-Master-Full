@@ -840,6 +840,10 @@ void loop()
 {
     const uint32_t now = millis();
 
+    // CAN/TWAI health service: completes bus-off recovery and performs a hard
+    // re-init if the controller does not recover on its own.
+    canDriver.service();
+
     // Scan state machine tick (+ active SDO probing per baud)
     scanActiveProbe(now);
     scanTick(now);

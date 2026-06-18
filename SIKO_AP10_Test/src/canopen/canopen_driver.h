@@ -38,6 +38,13 @@ private:
     uint32_t m_rxCount;
     uint32_t m_txCount;
     uint32_t m_errorCount;
+    uint32_t m_recoveryCount;
+    bool     m_recoveryInProgress;
+    uint32_t m_recoveryStartMs;
+    uint32_t m_lastRecoveryAttemptMs;
+
+    static constexpr uint32_t RECOVERY_RETRY_MS = 1000;
+    static constexpr uint32_t RECOVERY_HARD_RESET_MS = 5000;
 
     static void printTwaiStatus(const char* tag)
     {
@@ -79,8 +86,7 @@ private:
                 twai_status_info_t status;
                 if (twai_get_status_info(&status) == ESP_OK) {
                     if (status.state == TWAI_STATE_BUS_OFF) {
-                        Serial.println("[CANopen] Bus-Off! Versuche Recovery...");
-                        twai_initiate_recovery();
+                        drv->requestRecovery("rx");
                     }
                 }
             }
@@ -147,6 +153,39 @@ private:
         return false;
     }
 
+    void requestRecovery(const char* reason)
+    {
+        if (!m_initialized) return;
+
+        const uint32_t now = millis();
+        if (m_recoveryInProgress) return;
+        if (now - m_lastRecoveryAttemptMs < RECOVERY_RETRY_MS) return;
+
+        m_lastRecoveryAttemptMs = now;
+        esp_err_t e = twai_initiate_recovery();
+        if (e == ESP_OK) {
+            m_recoveryInProgress = true;
+            m_recoveryStartMs = now;
+            Serial.printf("[CANopen] Bus-Off Recovery gestartet (%s)\n", reason ? reason : "?");
+        } else if (e != ESP_ERR_INVALID_STATE) {
+            Serial.printf("[CANopen] WARN: twai_initiate_recovery fehlgeschlagen (%s): %d\n",
+                          reason ? reason : "?", (int)e);
+        }
+    }
+
+    void hardResetAfterRecoveryTimeout()
+    {
+        Serial.println("[CANopen] WARN: Bus-Off Recovery Timeout -> harter TWAI Re-Init");
+        const uint8_t tx = m_txPin;
+        const uint8_t rx = m_rxPin;
+        const uint32_t baud = m_baudrate;
+        deinit();
+        delay(50);
+        if (init(tx, rx, baud)) {
+            start();
+        }
+    }
+
 public:
     CanopenDriver()
         : m_initialized(false)
@@ -163,6 +202,10 @@ public:
         , m_rxCount(0)
         , m_txCount(0)
         , m_errorCount(0)
+        , m_recoveryCount(0)
+        , m_recoveryInProgress(false)
+        , m_recoveryStartMs(0)
+        , m_lastRecoveryAttemptMs(0)
     {}
 
     ~CanopenDriver() { deinit(); }
@@ -221,6 +264,8 @@ public:
         }
 
         m_initialized = false;
+        m_recoveryInProgress = false;
+        m_recoveryStartMs = 0;
     }
 
     bool init(uint8_t txPin, uint8_t rxPin, uint32_t baudrate = 250000)
@@ -233,6 +278,8 @@ public:
         m_txPin = txPin;
         m_rxPin = rxPin;
         m_baudrate = baudrate;
+        m_recoveryInProgress = false;
+        m_recoveryStartMs = 0;
 
         Serial.printf("[CANopen] Init TX=%d RX=%d @ %lu bps (mode=%s)\n",
                       txPin, rxPin, (unsigned long)baudrate,
@@ -298,12 +345,53 @@ public:
         m_errorCount++;
         Serial.printf("[CANopen] TX Fehler COB-ID=0x%03lX err=%d\n", (unsigned long)cobId, (int)e);
         printTwaiStatus("TWAI");
+        twai_status_info_t status;
+        if (twai_get_status_info(&status) == ESP_OK && status.state == TWAI_STATE_BUS_OFF) {
+            requestRecovery("tx");
+        }
         return false;
     }
 
     uint32_t rxCount() const { return m_rxCount; }
     uint32_t txCount() const { return m_txCount; }
     uint32_t errCount() const { return m_errorCount; }
+    uint32_t recoveryCount() const { return m_recoveryCount; }
+
+    void service()
+    {
+        if (!m_initialized || !m_running) return;
+
+        twai_status_info_t status;
+        if (twai_get_status_info(&status) != ESP_OK) return;
+
+        const uint32_t now = millis();
+        if (status.state == TWAI_STATE_BUS_OFF) {
+            m_errorCount++;
+            requestRecovery("service");
+            return;
+        }
+
+        if (!m_recoveryInProgress) return;
+
+        if (status.state == TWAI_STATE_STOPPED) {
+            esp_err_t e = twai_start();
+            if (e == ESP_OK) {
+                m_recoveryInProgress = false;
+                m_recoveryCount++;
+                Serial.printf("[CANopen] Bus-Off Recovery abgeschlossen (count=%lu)\n",
+                              (unsigned long)m_recoveryCount);
+                printTwaiStatus("TWAI");
+            } else {
+                Serial.printf("[CANopen] WARN: twai_start nach Recovery fehlgeschlagen: %d\n", (int)e);
+            }
+            return;
+        }
+
+        if (now - m_recoveryStartMs > RECOVERY_HARD_RESET_MS) {
+            m_recoveryInProgress = false;
+            hardResetAfterRecoveryTimeout();
+        }
+    }
 
     // True while it is safe to keep transmitting. Used by active auto-scan to
     // stop probing a wrong baudrate before the unacked TX pushes us to bus-off.
