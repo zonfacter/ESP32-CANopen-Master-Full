@@ -205,6 +205,15 @@ public:
         lv_obj_set_style_text_font(m_lblBaudStatus, &lv_font_montserrat_14, 0);
         lv_obj_set_pos(m_lblBaudStatus, x, y + 56);
 
+        // Live device status line (e.g. decoded Rexroth fieldbus status word)
+        m_lblDevStatus = lv_label_create(m_content);
+        lv_label_set_text(m_lblDevStatus, "");
+        lv_obj_set_style_text_color(m_lblDevStatus, lv_color_hex(0x66CCFF), 0);
+        lv_obj_set_style_text_font(m_lblDevStatus, &lv_font_montserrat_16, 0);
+        lv_obj_set_pos(m_lblDevStatus, x, y + 84);
+        lv_label_set_long_mode(m_lblDevStatus, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(m_lblDevStatus, 760);
+
         // On-screen numeric keypad (sibling of m_content so it never scrolls);
         // hidden until the Node-ID field is focused, bottom-aligned.
         m_kb = lv_keyboard_create(m_screen);
@@ -352,6 +361,14 @@ public:
         lv_obj_set_style_text_color(m_lblBaudStatus, lv_color_hex(ok ? 0x33DD66 : 0xFF6666), 0);
     }
 
+    // Live device status line (decoded). kind: 0=info(blue), 1=ok(green), 2=warn(red).
+    void setDeviceStatus(const char* text, uint8_t kind = 0) {
+        if (!m_lblDevStatus) return;
+        const uint32_t col = (kind == 1) ? 0x33DD66 : (kind == 2) ? 0xFF6666 : 0x66CCFF;
+        lv_obj_set_style_text_color(m_lblDevStatus, lv_color_hex(col), 0);
+        lv_label_set_text(m_lblDevStatus, text ? text : "");
+    }
+
     // Prominent confirmation that the baud write succeeded and a power-cycle is
     // required. baudKbps = new rate in kBit/s (for the message), 0 = omit.
     void showBaudWrittenMsg(uint32_t baudKbps) {
@@ -440,6 +457,7 @@ private:
     lv_obj_t* m_lblLast = nullptr;
 
     lv_obj_t* m_lblBaudStatus = nullptr;
+    lv_obj_t* m_lblDevStatus = nullptr;
 
     // Identity + error-register widgets
     lv_obj_t* m_lblVendor = nullptr;

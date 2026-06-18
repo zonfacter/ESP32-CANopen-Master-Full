@@ -95,6 +95,7 @@ static AP10_UI ap04Ui; // reuse the existing AP10/AP04 UI page as AP04 page
 static CanopenMasterController master(&canDriver);
 
 static uint8_t selectedNodeId = 0;
+static bool nodeDetailActive = false;
 
 // LSS master (CiA 305) for Node-ID / baudrate configuration
 static LssMaster lssMaster(&canDriver);
@@ -159,6 +160,38 @@ static bool ecodriveBaudValue(uint32_t baud, uint32_t& v) {
             return false;
     }
 }
+
+// Decode the Rexroth fieldbus status word P-0-4078 (0x3FEE:00) into readable text.
+//   bits 0,1 = phase (00=P2/param, 01=P3, 10=P4/operating)
+//   bit3 standstill, bit4 in position, bit7 drive halt
+//   bit11 class3 msg, bit12 class2 warn, bit13 class1 error
+//   bits 14,15 = ready (00 not ready, 01 ready power-on, 10 ready torque-free, 11 operating)
+static void ecodriveStatusText(uint16_t sw, char* out, size_t n) {
+    if (!out || n == 0) return;
+    const char* phase = ((sw & 3) == 0) ? "P2" : ((sw & 3) == 1) ? "P3" : ((sw & 3) == 2) ? "P4" : "P?";
+    const char* ready;
+    switch ((sw >> 14) & 3) {
+        case 0:  ready = "nicht bereit"; break;
+        case 1:  ready = "bereit (Power-On)"; break;
+        case 2:  ready = "betriebsbereit, momentenfrei"; break;
+        default: ready = "in Betrieb (Moment)"; break;
+    }
+    int p = snprintf(out, n, "Status 0x%04X | %s | %s", (unsigned)sw, phase, ready);
+    auto add = [&](const char* s){ if (p > 0 && p < (int)n - 1) p += snprintf(out + p, n - p, " | %s", s); };
+    if (sw & (1u << 3))  add("Stillstand");
+    if (sw & (1u << 4))  add("In-Pos");
+    if (sw & (1u << 7))  add("Drive-Halt");
+    if (sw & (1u << 13)) add("C1-Fehler");
+    else if (sw & (1u << 12)) add("C2-Warnung");
+    else if (sw & (1u << 11)) add("C3-Meldung");
+}
+
+// Live ECODRIVE status poll state (callback writes plain values only; the label
+// is updated from loop context under the LVGL lock).
+static uint32_t ecoLivePollNextMs = 0;
+static volatile uint16_t ecoLiveStatusWord = 0;
+static volatile bool     ecoLiveStatusValid = false;
+static volatile bool     ecoLiveStatusNew = false;
 
 // AP04 page/device state
 static SikoAP04* ap04Dev = nullptr;
@@ -658,8 +691,10 @@ void setup()
     cbs.onOpenNode = [](uint8_t nodeId){
         Serial.printf("[UI] Node selected: %u -> open detail\n", (unsigned)nodeId);
         selectedNodeId = nodeId;
+        nodeDetailActive = true;
         lvgl_port_lock(-1);
         refreshNodeDetail();
+        nodeUi.setDeviceStatus("");   // clear stale live status from a previous node
         nodeUi.load();
         lvgl_port_unlock();
     };
@@ -667,12 +702,14 @@ void setup()
     cbs.onConnectNode = [](uint8_t nodeId){
         Serial.printf("[UI] CONNECT node: %u\n", (unsigned)nodeId);
         selectedNodeId = nodeId;
+        nodeDetailActive = true;
 
         const KnownDeviceType kt = KnownDeviceType::Unknown;
         master.connectNode(nodeId, kt);
 
         lvgl_port_lock(-1);
         refreshNodeDetail();
+        nodeUi.setDeviceStatus("");
         nodeUi.load();
         lvgl_port_unlock();
     };
@@ -708,6 +745,8 @@ void setup()
     NodeDetail_Callbacks ncbs;
     ncbs.onBack = [](){
         Serial.println("[UI] Back to start menu");
+        nodeDetailActive = false;
+        selectedNodeId = 0;   // stop the live status poll when leaving node detail
         lv_scr_load_anim(startUi.screen(), LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
     };
 
@@ -1230,6 +1269,57 @@ void loop()
         }
     }
 
+    // Live ECODRIVE status line on the standard node-detail page.
+    if (ecoLiveStatusNew) {
+        const bool valid = ecoLiveStatusValid;
+        const uint16_t sw = ecoLiveStatusWord;
+        ecoLiveStatusNew = false;
+
+        char text[160];
+        uint8_t kind = 0;
+        if (valid) {
+            ecodriveStatusText(sw, text, sizeof(text));
+            if (sw & ((1u << 13) | (1u << 12))) kind = 2;       // error/warning
+            else if (((sw >> 14) & 0x3) >= 1) kind = 1;         // ready
+        } else {
+            snprintf(text, sizeof(text), "Statuswort P-0-4078 nicht lesbar");
+            kind = 2;
+        }
+
+        if (nodeDetailActive && selectedNodeId >= 1 && selectedNodeId <= 127) {
+            const auto& dn = master.node(selectedNodeId);
+            if (dn.known == KnownDeviceType::BoschRexroth_ECODRIVE) {
+                lvgl_port_lock(-1);
+                nodeUi.setDeviceStatus(text, kind);
+                lvgl_port_unlock();
+            }
+        }
+    }
+
+    if (nodeDetailActive
+        && selectedNodeId >= 1 && selectedNodeId <= 127
+        && !stdReadRunning
+        && !ecoWriteRunning
+        && !identifyAllRunning
+        && !pingScanRunning
+        && !scanRunning
+        && !stdSdo.isBusy()
+        && (int32_t)(now - ecoLivePollNextMs) >= 0) {
+        const auto& dn = master.node(selectedNodeId);
+        if (dn.known == KnownDeviceType::BoschRexroth_ECODRIVE) {
+            stdSdo.setNodeId(selectedNodeId);
+            stdSdo.setTimeout(350);
+            stdSdo.readAsync(0x3FEE, 0x00, [](SdoResult r, uint32_t v){
+                ecoLiveStatusValid = (r == SDO_OK);
+                ecoLiveStatusWord = (uint16_t)(v & 0xFFFF);
+                ecoLiveStatusNew = true;
+            });
+            ecoLivePollNextMs = now + 1000;
+        } else {
+            ecoLivePollNextMs = now + 1000;
+        }
+    }
+
     // Deferred UI navigation (LVGL)
     if (navPendingUiSwitch) {
         navPendingUiSwitch = false;
@@ -1237,7 +1327,9 @@ void loop()
         refreshStartMenuList();
         lv_scr_load_anim(startUi.screen(), LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
         if (navOpenNodeDetail && selectedNodeId >= 1 && selectedNodeId <= 127) {
+            nodeDetailActive = true;
             refreshNodeDetail();
+            nodeUi.setDeviceStatus("");
             nodeUi.load();
         }
         lvgl_port_unlock();
@@ -1267,6 +1359,7 @@ void loop()
         if (!dn.identifyInProgress && dn.known == KnownDeviceType::SIKO_AP04) {
             ap04PageLoaded = true;
             ap04UiIsActive = true;
+            nodeDetailActive = false;
 
             if (!ap04Dev) {
                 ap04Dev = new SikoAP04(&canDriver, selectedNodeId);
@@ -1298,6 +1391,7 @@ void loop()
 
                 ap04UiIsActive = false;
                 ap04PageLoaded = false;
+                nodeDetailActive = false;
                 ap04Dev = nullptr;
 
                 navOpenNodeDetail = cfg.navOpenNodeDetail;
@@ -1322,6 +1416,7 @@ void loop()
         const auto& dn = master.node(selectedNodeId);
         if (!dn.identifyInProgress && dn.known == KnownDeviceType::Dunker_75CI) {
             dunkerPageLoaded = true;
+            nodeDetailActive = false;
 
             // Reuse one heap object across connects (rebind -> no leak, no RX race)
             if (!dunkerDev) dunkerDev = new DunkerDrive(&canDriver, selectedNodeId);
@@ -1335,6 +1430,7 @@ void loop()
                 Serial.println("[UI] Dunker: back to main");
                 dunkerUiIsActive = false;   // stop RX processing BEFORE leaving
                 dunkerPageLoaded = false;
+                nodeDetailActive = false;
                 // Clear the selection so the auto-route block does not immediately
                 // recreate the Dunker page (and leak LVGL screens) on the same pass.
                 selectedNodeId = 0;
