@@ -1530,14 +1530,15 @@ void loop()
     // Live monitor refresh (build a newest-first log from the sniffer buffer)
     if (monitorActive && (now - lastMonitorMs >= 150)) {
         lastMonitorMs = now;
-        std::vector<DecodedFrame> frames = sniffer.getRecentFramesCopy();
 
+        DecodedFrame frames[28];
+        uint16_t totalFrames = 0;
+        const uint16_t frameCount = sniffer.copyRecentNewest(frames, 28, &totalFrames);
         static char logbuf[2048];
         size_t pos = 0;
         logbuf[0] = 0;
-        int shown = 0;
-        for (int i = (int)frames.size() - 1; i >= 0 && shown < 28; --i, ++shown) {
-            const DecodedFrame& df = frames[(size_t)i];
+        for (uint16_t i = 0; i < frameCount; ++i) {
+            const DecodedFrame& df = frames[i];
             int w = snprintf(logbuf + pos, sizeof(logbuf) - pos, "0x%03X %-8s N%-3u %u:",
                              (unsigned)df.raw.id, df.type ? df.type : "",
                              (unsigned)df.nodeId, (unsigned)df.raw.dlc);
@@ -1555,7 +1556,7 @@ void loop()
         if (pos == 0) snprintf(logbuf, sizeof(logbuf), "(keine Frames - Bus ruhig?)");
 
         lvgl_port_lock(-1);
-        monitorUi.setLog(logbuf, (uint16_t)frames.size());
+        monitorUi.setLog(logbuf, totalFrames);
         lvgl_port_unlock();
     }
 

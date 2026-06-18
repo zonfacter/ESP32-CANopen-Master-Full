@@ -105,6 +105,27 @@ std::vector<DecodedFrame> SnifferManager::getRecentFramesCopy()
     return copy;
 }
 
+uint16_t SnifferManager::copyRecentNewest(DecodedFrame* out, uint16_t maxOut, uint16_t* totalAvailable)
+{
+    portENTER_CRITICAL(&_recentMux);
+    const uint16_t cap = (uint16_t)_recentRing.size();
+    const uint16_t count = _recentCount;
+    if (totalAvailable) *totalAvailable = count;
+
+    uint16_t copied = 0;
+    if (out && maxOut > 0 && cap > 0 && count > 0) {
+        const uint16_t n = (count < maxOut) ? count : maxOut;
+        for (uint16_t i = 0; i < n; ++i) {
+            const uint16_t newestOffset = (uint16_t)(i + 1);
+            const uint16_t idx = (uint16_t)((_recentHead + cap - newestOffset) % cap);
+            out[i] = _recentRing[idx];
+        }
+        copied = n;
+    }
+    portEXIT_CRITICAL(&_recentMux);
+    return copied;
+}
+
 void SnifferManager::clearRecent()
 {
     portENTER_CRITICAL(&_recentMux);

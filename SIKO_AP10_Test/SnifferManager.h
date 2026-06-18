@@ -70,6 +70,7 @@ public:
 
     // UI access (copy out)
     std::vector<DecodedFrame> getRecentFramesCopy();
+    uint16_t copyRecentNewest(DecodedFrame* out, uint16_t maxOut, uint16_t* totalAvailable = nullptr);
     void clearRecent();
 
     // Filters (applied in decode/task stage)
