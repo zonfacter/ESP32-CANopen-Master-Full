@@ -15,6 +15,9 @@ void SnifferManager::begin(const Config& cfg)
     _recentRing.resize(_cfg.maxRecentFrames);
     _recentHead = 0;
     _recentCount = 0;
+    _serialWindowStartMs = 0;
+    _serialWindowCount = 0;
+    _serialSuppressedCount = 0;
 
     if (_q) {
         vQueueDelete(_q);
@@ -69,6 +72,14 @@ void SnifferManager::setEnabled(bool en)
         _enabled = false;
         if (_q) xQueueReset(_q);
     }
+}
+
+void SnifferManager::setSerialOutput(bool en)
+{
+    _serialOutput = en;
+    _serialWindowStartMs = 0;
+    _serialWindowCount = 0;
+    _serialSuppressedCount = 0;
 }
 
 void SnifferManager::processFrame(uint32_t id, uint8_t dlc, const uint8_t* data, bool ext, bool rtr)
@@ -219,6 +230,30 @@ static void printDecodedSerial(const DecodedFrame& df)
     Serial.println();
 }
 
+void SnifferManager::printDecodedSerialThrottled(const DecodedFrame& df)
+{
+    const uint16_t maxPerSecond = _cfg.serialPrintMaxPerSecond;
+    if (maxPerSecond == 0) return;
+
+    const uint32_t now = millis();
+    if (_serialWindowStartMs == 0 || now - _serialWindowStartMs >= 1000) {
+        if (_serialSuppressedCount > 0) {
+            Serial.printf("[SNIFF] Serial output suppressed %lu frame(s)\n",
+                          (unsigned long)_serialSuppressedCount);
+        }
+        _serialWindowStartMs = now;
+        _serialWindowCount = 0;
+        _serialSuppressedCount = 0;
+    }
+
+    if (_serialWindowCount < maxPerSecond) {
+        printDecodedSerial(df);
+        _serialWindowCount++;
+    } else {
+        _serialSuppressedCount++;
+    }
+}
+
 const char* SnifferManager::classifyType(const SniffFrame& f, uint16_t baseId, uint8_t nodeId)
 {
     (void)nodeId;
@@ -315,6 +350,6 @@ void SnifferManager::decodeAndStore(const SniffFrame& f)
     portEXIT_CRITICAL(&_recentMux);
 
     if (_serialOutput) {
-        printDecodedSerial(df);
+        printDecodedSerialThrottled(df);
     }
 }

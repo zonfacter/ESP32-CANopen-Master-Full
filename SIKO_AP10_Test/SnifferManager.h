@@ -49,6 +49,7 @@ public:
         uint16_t maxRecentFrames = 120; // UI log size
         uint32_t uiPollMinMs = 100;     // recommended UI refresh cadence
         uint32_t noTrafficWarnMs = 1000;
+        uint16_t serialPrintMaxPerSecond = 40;
     };
 
     SnifferManager();
@@ -82,13 +83,14 @@ public:
     void setIdRangeFilter(bool enabled, uint32_t idMin, uint32_t idMax);
 
     // Serial output (optional)
-    void setSerialOutput(bool en) { _serialOutput = en; }
+    void setSerialOutput(bool en);
 
 private:
     static void taskThunk(void* arg);
     void taskLoop();
 
     void decodeAndStore(const SniffFrame& f);
+    void printDecodedSerialThrottled(const DecodedFrame& df);
     static const char* classifyType(const SniffFrame& f, uint16_t baseId, uint8_t nodeId);
     bool passFilters(const DecodedFrame& df) const;
 
@@ -98,6 +100,9 @@ private:
     // runtime
     bool _enabled = false;
     bool _serialOutput = true;
+    uint32_t _serialWindowStartMs = 0;
+    uint16_t _serialWindowCount = 0;
+    uint32_t _serialSuppressedCount = 0;
 
     // queue
     QueueHandle_t _q = nullptr;

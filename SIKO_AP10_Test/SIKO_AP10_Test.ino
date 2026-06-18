@@ -546,9 +546,10 @@ void setup()
         SnifferManager::Config scfg;
         scfg.queueLen = 128;
         scfg.maxRecentFrames = 120;
+        scfg.serialPrintMaxPerSecond = 40;
         sniffer.begin(scfg);
         sniffer.setEnabled(false);        // Sniffer ON/OFF
-        sniffer.setSerialOutput(true);    // Serial output in Phase A
+        sniffer.setSerialOutput(true);    // throttled serial frame output
     }
 
     if (!initDisplay()) {
