@@ -356,6 +356,25 @@ public:
     uint32_t txCount() const { return m_txCount; }
     uint32_t errCount() const { return m_errorCount; }
     uint32_t recoveryCount() const { return m_recoveryCount; }
+    bool recoveryInProgress() const { return m_recoveryInProgress; }
+
+    const char* stateText() const
+    {
+        if (!m_initialized) return "Not initialized";
+        if (!m_running) return "Stopped";
+        if (m_recoveryInProgress) return "Recovering";
+
+        twai_status_info_t status;
+        if (twai_get_status_info(&status) != ESP_OK) return "Status error";
+
+        switch (status.state) {
+            case TWAI_STATE_STOPPED:    return "Stopped";
+            case TWAI_STATE_RUNNING:    return "Running";
+            case TWAI_STATE_BUS_OFF:    return "Bus-Off";
+            case TWAI_STATE_RECOVERING: return "Recovering";
+            default:                    return "Unknown";
+        }
+    }
 
     void service()
     {

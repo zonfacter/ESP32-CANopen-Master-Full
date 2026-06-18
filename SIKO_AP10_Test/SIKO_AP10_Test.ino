@@ -1514,6 +1514,7 @@ void loop()
             if (ap04UiIsActive) {
                 refreshAp04();
                 AP10UI_CanStats stats;
+                stats.busState = canDriver.stateText();
                 stats.rxCount = canDriver.rxCount();
                 stats.txCount = canDriver.txCount();
                 stats.errCount = canDriver.errCount();
@@ -1562,9 +1563,10 @@ void loop()
     if (now - lastStatusPrint >= Config::STATUS_PRINT_MS) {
         lastStatusPrint = now;
 
-        Serial.printf("[STATUS] mode=%u baud=%lu scan=%s sniffer=%s drops=%lu age=%lu ms recoveries=%lu\n",
+        Serial.printf("[STATUS] mode=%u baud=%lu bus=%s scan=%s sniffer=%s drops=%lu age=%lu ms recoveries=%lu\n",
                       (unsigned)master.mode(),
                       (unsigned long)activeBaud,
+                      canDriver.stateText(),
                       scanRunning ? "RUN" : "STOP",
                       snifferEnabled ? "ON" : "OFF",
                       (unsigned long)sniffer.getDroppedCount(),

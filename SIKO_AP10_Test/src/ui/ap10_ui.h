@@ -65,6 +65,7 @@ using AP10UI_ConfigCallback = std::function<void(const AP10UI_Config&)>;
 // CAN-Statistiken
 // ============================================================================
 struct AP10UI_CanStats {
+    const char* busState = "---";
     uint32_t rxCount  = 0;
     uint32_t txCount  = 0;
     uint32_t errCount = 0;
@@ -287,6 +288,8 @@ public:
         if (!m_cfgScreen || !m_cfgLblRx) return;
 
         char buf[64];
+        snprintf(buf, sizeof(buf), "Bus:       %s", stats.busState ? stats.busState : "---");
+        lv_label_set_text(m_cfgLblBusState, buf);
         snprintf(buf, sizeof(buf), "CAN RX:    %lu", (unsigned long)stats.rxCount);
         lv_label_set_text(m_cfgLblRx, buf);
         snprintf(buf, sizeof(buf), "CAN TX:    %lu", (unsigned long)stats.txCount);
@@ -364,6 +367,7 @@ private:
     lv_obj_t* m_cfgRollerNodeId  = nullptr;
     lv_obj_t* m_cfgDropBaud      = nullptr;
     lv_obj_t* m_cfgSpinScale     = nullptr;
+    lv_obj_t* m_cfgLblBusState   = nullptr;
     lv_obj_t* m_cfgLblRx         = nullptr;
     lv_obj_t* m_cfgLblTx         = nullptr;
     lv_obj_t* m_cfgLblErr        = nullptr;
@@ -1080,12 +1084,13 @@ private:
 
         makeLabel(cardRight, "Live-Statistiken:", AP10UI_COLOR_WHITE, &lv_font_montserrat_16, 10, 240);
 
-        m_cfgLblRx       = makeLabel(cardRight, "CAN RX:    0", AP10UI_COLOR_GREEN,    &lv_font_montserrat_16, 10, 265);
-        m_cfgLblTx       = makeLabel(cardRight, "CAN TX:    0", AP10UI_COLOR_BLUE_BTN, &lv_font_montserrat_16, 10, 287);
-        m_cfgLblErr      = makeLabel(cardRight, "CAN Err:   0", AP10UI_COLOR_RED,      &lv_font_montserrat_16, 10, 309);
-        m_cfgLblRecovery = makeLabel(cardRight, "Recovery:  0", AP10UI_COLOR_ORANGE_BTN, &lv_font_montserrat_16, 10, 331);
-        m_cfgLblSync     = makeLabel(cardRight, "SYNC TX:   0", AP10UI_COLOR_YELLOW,   &lv_font_montserrat_16, 10, 353);
-        m_cfgLblPdo      = makeLabel(cardRight, "PDO-Upd:   0", AP10UI_COLOR_WHITE,    &lv_font_montserrat_16, 10, 375);
+        m_cfgLblBusState = makeLabel(cardRight, "Bus:       ---", AP10UI_COLOR_WHITE,    &lv_font_montserrat_14, 10, 263);
+        m_cfgLblRx       = makeLabel(cardRight, "CAN RX:    0",   AP10UI_COLOR_GREEN,    &lv_font_montserrat_14, 10, 283);
+        m_cfgLblTx       = makeLabel(cardRight, "CAN TX:    0",   AP10UI_COLOR_BLUE_BTN, &lv_font_montserrat_14, 10, 303);
+        m_cfgLblErr      = makeLabel(cardRight, "CAN Err:   0",   AP10UI_COLOR_RED,      &lv_font_montserrat_14, 10, 323);
+        m_cfgLblRecovery = makeLabel(cardRight, "Recovery:  0",   AP10UI_COLOR_ORANGE_BTN, &lv_font_montserrat_14, 10, 343);
+        m_cfgLblSync     = makeLabel(cardRight, "SYNC TX:   0",   AP10UI_COLOR_YELLOW,   &lv_font_montserrat_14, 10, 363);
+        m_cfgLblPdo      = makeLabel(cardRight, "PDO-Upd:   0",   AP10UI_COLOR_WHITE,    &lv_font_montserrat_14, 10, 383);
 
         // Footer
         lv_obj_t* cfgFooter = lv_label_create(m_cfgScreen);
