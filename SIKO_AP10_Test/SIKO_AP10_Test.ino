@@ -10,6 +10,7 @@
  */
 
 #include <Arduino.h>
+#include <esp_heap_caps.h>
 #include <esp_display_panel.hpp>
 #include <lvgl.h>
 
@@ -1574,7 +1575,10 @@ void loop()
     if (now - lastStatusPrint >= Config::STATUS_PRINT_MS) {
         lastStatusPrint = now;
 
-        Serial.printf("[STATUS] mode=%u baud=%lu bus=%s scan=%s sniffer=%s drops=%lu q=%u/%u age=%lu ms recoveries=%lu\n",
+        const uint32_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+        const uint32_t largestHeap = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+
+        Serial.printf("[STATUS] mode=%u baud=%lu bus=%s scan=%s sniffer=%s drops=%lu q=%u/%u age=%lu ms recoveries=%lu heap=%lu largest=%lu\n",
                       (unsigned)master.mode(),
                       (unsigned long)activeBaud,
                       canDriver.stateText(),
@@ -1584,7 +1588,9 @@ void loop()
                       (unsigned)sniffer.getQueueDepth(),
                       (unsigned)sniffer.getQueueHighWatermark(),
                       (unsigned long)sniffer.getLastTrafficAgeMs(),
-                      (unsigned long)canDriver.recoveryCount());
+                      (unsigned long)canDriver.recoveryCount(),
+                      (unsigned long)freeHeap,
+                      (unsigned long)largestHeap);
     }
 
     // Phase B UI integration will toggle snifferEnabled.
