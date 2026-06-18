@@ -43,9 +43,13 @@ private:
     bool     m_busOffLatched;
     uint32_t m_recoveryStartMs;
     uint32_t m_lastRecoveryAttemptMs;
+    bool     m_txErrorLogPrimed;
+    uint32_t m_lastTxErrorLogMs;
+    uint32_t m_suppressedTxErrorLogs;
 
     static constexpr uint32_t RECOVERY_RETRY_MS = 1000;
     static constexpr uint32_t RECOVERY_HARD_RESET_MS = 5000;
+    static constexpr uint32_t TX_ERROR_LOG_INTERVAL_MS = 1000;
 
     static void printTwaiStatus(const char* tag)
     {
@@ -182,6 +186,23 @@ private:
         requestRecovery(reason);
     }
 
+    void logTxError(uint32_t cobId, esp_err_t err)
+    {
+        const uint32_t now = millis();
+        if (!m_txErrorLogPrimed || now - m_lastTxErrorLogMs >= TX_ERROR_LOG_INTERVAL_MS) {
+            Serial.printf("[CANopen] TX Fehler COB-ID=0x%03lX err=%d (suppressed=%lu)\n",
+                          (unsigned long)cobId,
+                          (int)err,
+                          (unsigned long)m_suppressedTxErrorLogs);
+            printTwaiStatus("TWAI");
+            m_txErrorLogPrimed = true;
+            m_lastTxErrorLogMs = now;
+            m_suppressedTxErrorLogs = 0;
+        } else {
+            m_suppressedTxErrorLogs++;
+        }
+    }
+
     void hardResetAfterRecoveryTimeout()
     {
         Serial.println("[CANopen] WARN: Bus-Off Recovery Timeout -> harter TWAI Re-Init");
@@ -216,6 +237,9 @@ public:
         , m_busOffLatched(false)
         , m_recoveryStartMs(0)
         , m_lastRecoveryAttemptMs(0)
+        , m_txErrorLogPrimed(false)
+        , m_lastTxErrorLogMs(0)
+        , m_suppressedTxErrorLogs(0)
     {}
 
     ~CanopenDriver() { deinit(); }
@@ -277,6 +301,8 @@ public:
         m_recoveryInProgress = false;
         m_busOffLatched = false;
         m_recoveryStartMs = 0;
+        m_txErrorLogPrimed = false;
+        m_suppressedTxErrorLogs = 0;
     }
 
     bool init(uint8_t txPin, uint8_t rxPin, uint32_t baudrate = 250000)
@@ -292,6 +318,8 @@ public:
         m_recoveryInProgress = false;
         m_busOffLatched = false;
         m_recoveryStartMs = 0;
+        m_txErrorLogPrimed = false;
+        m_suppressedTxErrorLogs = 0;
 
         Serial.printf("[CANopen] Init TX=%d RX=%d @ %lu bps (mode=%s)\n",
                       txPin, rxPin, (unsigned long)baudrate,
@@ -355,8 +383,7 @@ public:
             return true;
         }
 
-        Serial.printf("[CANopen] TX Fehler COB-ID=0x%03lX err=%d\n", (unsigned long)cobId, (int)e);
-        printTwaiStatus("TWAI");
+        logTxError(cobId, e);
         twai_status_info_t status;
         if (twai_get_status_info(&status) == ESP_OK && status.state == TWAI_STATE_BUS_OFF) {
             noteBusOff("tx");
