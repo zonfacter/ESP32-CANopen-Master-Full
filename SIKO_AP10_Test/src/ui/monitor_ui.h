@@ -111,11 +111,17 @@ public:
         if (m_screen) lv_scr_load_anim(m_screen, LV_SCR_LOAD_ANIM_MOVE_LEFT, 200, 0, false);
     }
 
-    void setLog(const char* text, uint16_t count) {
+    void setLog(const char* text, uint16_t count, uint32_t drops = 0, uint32_t ageMs = 0xFFFFFFFFu) {
         if (m_lblLog && text) lv_label_set_text(m_lblLog, text);
         if (m_lblCount) {
-            char b[24];
-            snprintf(b, sizeof(b), "%u Frames", (unsigned)count);
+            char b[64];
+            if (ageMs == 0xFFFFFFFFu) {
+                snprintf(b, sizeof(b), "%u Frames | Drops %lu | Age ---",
+                         (unsigned)count, (unsigned long)drops);
+            } else {
+                snprintf(b, sizeof(b), "%u Frames | Drops %lu | Age %lu ms",
+                         (unsigned)count, (unsigned long)drops, (unsigned long)ageMs);
+            }
             lv_label_set_text(m_lblCount, b);
         }
     }

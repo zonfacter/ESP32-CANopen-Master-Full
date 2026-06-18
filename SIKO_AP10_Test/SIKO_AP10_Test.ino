@@ -1556,7 +1556,7 @@ void loop()
         if (pos == 0) snprintf(logbuf, sizeof(logbuf), "(keine Frames - Bus ruhig?)");
 
         lvgl_port_lock(-1);
-        monitorUi.setLog(logbuf, totalFrames);
+        monitorUi.setLog(logbuf, totalFrames, sniffer.getDroppedCount(), sniffer.getLastTrafficAgeMs());
         lvgl_port_unlock();
     }
 
