@@ -10,6 +10,7 @@
  */
 
 #include <Arduino.h>
+#include <esp_heap_caps.h>
 #include <esp_display_panel.hpp>
 #include <lvgl.h>
 
@@ -546,9 +547,10 @@ void setup()
         SnifferManager::Config scfg;
         scfg.queueLen = 128;
         scfg.maxRecentFrames = 120;
+        scfg.serialPrintMaxPerSecond = 40;
         sniffer.begin(scfg);
         sniffer.setEnabled(false);        // Sniffer ON/OFF
-        sniffer.setSerialOutput(true);    // Serial output in Phase A
+        sniffer.setSerialOutput(true);    // throttled serial frame output
     }
 
     if (!initDisplay()) {
@@ -737,7 +739,11 @@ void setup()
         startUi.setSnifferEnabled(en);
         Serial.printf("[MONITOR] Sniffer %s\n", en ? "ON" : "OFF");
     };
-    mcbs.onClear = [](){ sniffer.clearRecent(); Serial.println("[MONITOR] cleared"); };
+    mcbs.onClear = [](){
+        sniffer.clearRecent();
+        sniffer.clearStats();
+        Serial.println("[MONITOR] cleared");
+    };
     monitorUi.setCallbacks(mcbs);
     monitorUi.create();
 
@@ -839,6 +845,10 @@ void setup()
 void loop()
 {
     const uint32_t now = millis();
+
+    // CAN/TWAI health service: completes bus-off recovery and performs a hard
+    // re-init if the controller does not recover on its own.
+    canDriver.service();
 
     // Scan state machine tick (+ active SDO probing per baud)
     scanActiveProbe(now);
@@ -1507,7 +1517,17 @@ void loop()
         if (!navPendingDisconnect && !navPendingUiSwitch && !ap04PendingReconnect) {
             lvgl_port_lock(-1);
             refreshNodeDetail();
-            if (ap04UiIsActive) refreshAp04();
+            if (ap04UiIsActive) {
+                refreshAp04();
+                AP10UI_CanStats stats;
+                stats.busState = canDriver.stateText();
+                stats.rxCount = canDriver.rxCount();
+                stats.txCount = canDriver.txCount();
+                stats.errCount = canDriver.errCount();
+                stats.recoveryCount = canDriver.recoveryCount();
+                stats.pdoCount = ap04Dev ? ap04Dev->getData().updateCount : 0;
+                ap04Ui.updateCanStats(stats);
+            }
             if (dunkerUiIsActive && dunkerDev) dunkerUi.update(dunkerDev->getData());
             lvgl_port_unlock();
         }
@@ -1516,14 +1536,15 @@ void loop()
     // Live monitor refresh (build a newest-first log from the sniffer buffer)
     if (monitorActive && (now - lastMonitorMs >= 150)) {
         lastMonitorMs = now;
-        std::vector<DecodedFrame> frames = sniffer.getRecentFramesCopy();
 
+        DecodedFrame frames[28];
+        uint16_t totalFrames = 0;
+        const uint16_t frameCount = sniffer.copyRecentNewest(frames, 28, &totalFrames);
         static char logbuf[2048];
         size_t pos = 0;
         logbuf[0] = 0;
-        int shown = 0;
-        for (int i = (int)frames.size() - 1; i >= 0 && shown < 28; --i, ++shown) {
-            const DecodedFrame& df = frames[(size_t)i];
+        for (uint16_t i = 0; i < frameCount; ++i) {
+            const DecodedFrame& df = frames[i];
             int w = snprintf(logbuf + pos, sizeof(logbuf) - pos, "0x%03X %-8s N%-3u %u:",
                              (unsigned)df.raw.id, df.type ? df.type : "",
                              (unsigned)df.nodeId, (unsigned)df.raw.dlc);
@@ -1541,7 +1562,12 @@ void loop()
         if (pos == 0) snprintf(logbuf, sizeof(logbuf), "(keine Frames - Bus ruhig?)");
 
         lvgl_port_lock(-1);
-        monitorUi.setLog(logbuf, (uint16_t)frames.size());
+        monitorUi.setLog(logbuf,
+                         totalFrames,
+                         sniffer.getDroppedCount(),
+                         sniffer.getLastTrafficAgeMs(),
+                         sniffer.getQueueDepth(),
+                         sniffer.getQueueHighWatermark());
         lvgl_port_unlock();
     }
 
@@ -1549,13 +1575,22 @@ void loop()
     if (now - lastStatusPrint >= Config::STATUS_PRINT_MS) {
         lastStatusPrint = now;
 
-        Serial.printf("[STATUS] mode=%u baud=%lu scan=%s sniffer=%s drops=%lu age=%lu ms\n",
+        const uint32_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+        const uint32_t largestHeap = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+
+        Serial.printf("[STATUS] mode=%u baud=%lu bus=%s scan=%s sniffer=%s drops=%lu q=%u/%u age=%lu ms recoveries=%lu heap=%lu largest=%lu\n",
                       (unsigned)master.mode(),
                       (unsigned long)activeBaud,
+                      canDriver.stateText(),
                       scanRunning ? "RUN" : "STOP",
                       snifferEnabled ? "ON" : "OFF",
                       (unsigned long)sniffer.getDroppedCount(),
-                      (unsigned long)sniffer.getLastTrafficAgeMs());
+                      (unsigned)sniffer.getQueueDepth(),
+                      (unsigned)sniffer.getQueueHighWatermark(),
+                      (unsigned long)sniffer.getLastTrafficAgeMs(),
+                      (unsigned long)canDriver.recoveryCount(),
+                      (unsigned long)freeHeap,
+                      (unsigned long)largestHeap);
     }
 
     // Phase B UI integration will toggle snifferEnabled.

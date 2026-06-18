@@ -49,6 +49,7 @@ public:
         uint16_t maxRecentFrames = 120; // UI log size
         uint32_t uiPollMinMs = 100;     // recommended UI refresh cadence
         uint32_t noTrafficWarnMs = 1000;
+        uint16_t serialPrintMaxPerSecond = 40;
     };
 
     SnifferManager();
@@ -67,10 +68,14 @@ public:
     uint32_t getDroppedCount() const { return _droppedCount; }
     uint32_t getLastFrameTimeMs() const { return _lastFrameTimeMs; }
     uint32_t getLastTrafficAgeMs() const;
+    uint16_t getQueueDepth() const;
+    uint16_t getQueueHighWatermark() const { return _queueHighWatermark; }
 
     // UI access (copy out)
     std::vector<DecodedFrame> getRecentFramesCopy();
+    uint16_t copyRecentNewest(DecodedFrame* out, uint16_t maxOut, uint16_t* totalAvailable = nullptr);
     void clearRecent();
+    void clearStats();
 
     // Filters (applied in decode/task stage)
     void setNodeIdFilter(uint8_t nodeIdOr0);
@@ -78,13 +83,14 @@ public:
     void setIdRangeFilter(bool enabled, uint32_t idMin, uint32_t idMax);
 
     // Serial output (optional)
-    void setSerialOutput(bool en) { _serialOutput = en; }
+    void setSerialOutput(bool en);
 
 private:
     static void taskThunk(void* arg);
     void taskLoop();
 
     void decodeAndStore(const SniffFrame& f);
+    void printDecodedSerialThrottled(const DecodedFrame& df);
     static const char* classifyType(const SniffFrame& f, uint16_t baseId, uint8_t nodeId);
     bool passFilters(const DecodedFrame& df) const;
 
@@ -94,6 +100,9 @@ private:
     // runtime
     bool _enabled = false;
     bool _serialOutput = true;
+    uint32_t _serialWindowStartMs = 0;
+    uint16_t _serialWindowCount = 0;
+    uint32_t _serialSuppressedCount = 0;
 
     // queue
     QueueHandle_t _q = nullptr;
@@ -102,9 +111,12 @@ private:
     // health
     volatile uint32_t _droppedCount = 0;
     volatile uint32_t _lastFrameTimeMs = 0;
+    volatile uint16_t _queueHighWatermark = 0;
 
-    // recent frames
-    std::vector<DecodedFrame> _recent;
+    // recent frames: fixed-size circular buffer, copied out as oldest->newest
+    std::vector<DecodedFrame> _recentRing;
+    uint16_t _recentHead = 0;   // next write position
+    uint16_t _recentCount = 0;  // valid entries
     portMUX_TYPE _recentMux = portMUX_INITIALIZER_UNLOCKED;
 
     // filters

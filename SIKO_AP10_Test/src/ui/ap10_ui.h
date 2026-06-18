@@ -65,9 +65,11 @@ using AP10UI_ConfigCallback = std::function<void(const AP10UI_Config&)>;
 // CAN-Statistiken
 // ============================================================================
 struct AP10UI_CanStats {
+    const char* busState = "---";
     uint32_t rxCount  = 0;
     uint32_t txCount  = 0;
     uint32_t errCount = 0;
+    uint32_t recoveryCount = 0;
     uint32_t syncTx   = 0;
     uint32_t pdoCount = 0;
 };
@@ -286,12 +288,16 @@ public:
         if (!m_cfgScreen || !m_cfgLblRx) return;
 
         char buf[64];
+        snprintf(buf, sizeof(buf), "Bus:       %s", stats.busState ? stats.busState : "---");
+        lv_label_set_text(m_cfgLblBusState, buf);
         snprintf(buf, sizeof(buf), "CAN RX:    %lu", (unsigned long)stats.rxCount);
         lv_label_set_text(m_cfgLblRx, buf);
         snprintf(buf, sizeof(buf), "CAN TX:    %lu", (unsigned long)stats.txCount);
         lv_label_set_text(m_cfgLblTx, buf);
         snprintf(buf, sizeof(buf), "CAN Err:   %lu", (unsigned long)stats.errCount);
         lv_label_set_text(m_cfgLblErr, buf);
+        snprintf(buf, sizeof(buf), "Recovery:  %lu", (unsigned long)stats.recoveryCount);
+        lv_label_set_text(m_cfgLblRecovery, buf);
         snprintf(buf, sizeof(buf), "SYNC TX:   %lu", (unsigned long)stats.syncTx);
         lv_label_set_text(m_cfgLblSync, buf);
         snprintf(buf, sizeof(buf), "PDO-Upd:   %lu", (unsigned long)stats.pdoCount);
@@ -361,9 +367,11 @@ private:
     lv_obj_t* m_cfgRollerNodeId  = nullptr;
     lv_obj_t* m_cfgDropBaud      = nullptr;
     lv_obj_t* m_cfgSpinScale     = nullptr;
+    lv_obj_t* m_cfgLblBusState   = nullptr;
     lv_obj_t* m_cfgLblRx         = nullptr;
     lv_obj_t* m_cfgLblTx         = nullptr;
     lv_obj_t* m_cfgLblErr        = nullptr;
+    lv_obj_t* m_cfgLblRecovery   = nullptr;
     lv_obj_t* m_cfgLblSync       = nullptr;
     lv_obj_t* m_cfgLblPdo        = nullptr;
 
@@ -1076,11 +1084,13 @@ private:
 
         makeLabel(cardRight, "Live-Statistiken:", AP10UI_COLOR_WHITE, &lv_font_montserrat_16, 10, 240);
 
-        m_cfgLblRx   = makeLabel(cardRight, "CAN RX:    0", AP10UI_COLOR_GREEN,    &lv_font_montserrat_16, 10, 265);
-        m_cfgLblTx   = makeLabel(cardRight, "CAN TX:    0", AP10UI_COLOR_BLUE_BTN, &lv_font_montserrat_16, 10, 289);
-        m_cfgLblErr  = makeLabel(cardRight, "CAN Err:   0", AP10UI_COLOR_RED,      &lv_font_montserrat_16, 10, 313);
-        m_cfgLblSync = makeLabel(cardRight, "SYNC TX:   0", AP10UI_COLOR_YELLOW,   &lv_font_montserrat_16, 10, 337);
-        m_cfgLblPdo  = makeLabel(cardRight, "PDO-Upd:   0", AP10UI_COLOR_WHITE,    &lv_font_montserrat_16, 10, 361);
+        m_cfgLblBusState = makeLabel(cardRight, "Bus:       ---", AP10UI_COLOR_WHITE,    &lv_font_montserrat_14, 10, 263);
+        m_cfgLblRx       = makeLabel(cardRight, "CAN RX:    0",   AP10UI_COLOR_GREEN,    &lv_font_montserrat_14, 10, 283);
+        m_cfgLblTx       = makeLabel(cardRight, "CAN TX:    0",   AP10UI_COLOR_BLUE_BTN, &lv_font_montserrat_14, 10, 303);
+        m_cfgLblErr      = makeLabel(cardRight, "CAN Err:   0",   AP10UI_COLOR_RED,      &lv_font_montserrat_14, 10, 323);
+        m_cfgLblRecovery = makeLabel(cardRight, "Recovery:  0",   AP10UI_COLOR_ORANGE_BTN, &lv_font_montserrat_14, 10, 343);
+        m_cfgLblSync     = makeLabel(cardRight, "SYNC TX:   0",   AP10UI_COLOR_YELLOW,   &lv_font_montserrat_14, 10, 363);
+        m_cfgLblPdo      = makeLabel(cardRight, "PDO-Upd:   0",   AP10UI_COLOR_WHITE,    &lv_font_montserrat_14, 10, 383);
 
         // Footer
         lv_obj_t* cfgFooter = lv_label_create(m_cfgScreen);

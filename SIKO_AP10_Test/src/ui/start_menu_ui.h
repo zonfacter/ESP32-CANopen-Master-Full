@@ -66,9 +66,15 @@ public:
 
     void setNodes(const StartMenu_NodeRow* rows, size_t count) {
         if (!m_list) return;
-        lv_obj_clean(m_list);
+
+        if (count > MAX_NODE_ROWS) count = MAX_NODE_ROWS;
 
         for (size_t i = 0; i < count; i++) {
+            NodeRowSlot& slot = m_nodeRows[i];
+            ensureNodeRowSlot(i);
+
+            slot.nodeId = rows[i].nodeId;
+
             char buf[96];
             snprintf(buf, sizeof(buf), "Node %u | %s | last %lu ms | %s",
                      (unsigned)rows[i].nodeId,
@@ -76,21 +82,12 @@ public:
                      (unsigned long)rows[i].lastSeenMs,
                      rows[i].typeText ? rows[i].typeText : "Unknown");
 
-            lv_obj_t* btn = lv_list_add_btn(m_list, LV_SYMBOL_DIRECTORY, buf);
-            lv_obj_set_height(btn, 44);
-            lv_obj_add_event_cb(btn, StartMenuUI::onNodeBtnClicked, LV_EVENT_CLICKED, (void*)(uintptr_t)rows[i].nodeId);
+            lv_label_set_text(slot.label, buf);
+            lv_obj_clear_flag(slot.row, LV_OBJ_FLAG_HIDDEN);
+        }
 
-            lv_obj_t* cbtn = lv_btn_create(btn);
-            lv_obj_set_size(cbtn, 110, 34);
-            lv_obj_align(cbtn, LV_ALIGN_RIGHT_MID, -8, 0);
-            lv_obj_set_style_bg_color(cbtn, lv_color_hex(0x007744), 0);
-            lv_obj_set_style_radius(cbtn, 8, 0);
-            lv_obj_add_event_cb(cbtn, StartMenuUI::onConnectBtnClicked, LV_EVENT_CLICKED, (void*)(uintptr_t)rows[i].nodeId);
-
-            lv_obj_t* clbl = lv_label_create(cbtn);
-            lv_label_set_text(clbl, "CONNECT");
-            lv_obj_set_style_text_color(clbl, lv_color_hex(0xFFFFFF), 0);
-            lv_obj_center(clbl);
+        for (size_t i = count; i < m_nodeRowCount; i++) {
+            if (m_nodeRows[i].row) lv_obj_add_flag(m_nodeRows[i].row, LV_OBJ_FLAG_HIDDEN);
         }
     }
 
@@ -151,6 +148,49 @@ private:
         lv_obj_set_style_text_font(l, &lv_font_montserrat_18, 0);
         lv_obj_center(l);
         return b;
+    }
+
+    struct NodeRowSlot {
+        lv_obj_t* row = nullptr;
+        lv_obj_t* label = nullptr;
+        lv_obj_t* connectBtn = nullptr;
+        lv_obj_t* connectLabel = nullptr;
+        uint8_t nodeId = 0;
+    };
+
+    void ensureNodeRowSlot(size_t index) {
+        if (index >= MAX_NODE_ROWS || m_nodeRows[index].row) return;
+
+        NodeRowSlot& slot = m_nodeRows[index];
+
+        slot.row = lv_btn_create(m_list);
+        lv_obj_set_size(slot.row, 760, 44);
+        lv_obj_set_style_bg_color(slot.row, lv_color_hex(0x1A1A33), 0);
+        lv_obj_set_style_radius(slot.row, 6, 0);
+        lv_obj_set_style_border_width(slot.row, 0, 0);
+        lv_obj_clear_flag(slot.row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(slot.row, StartMenuUI::onNodeBtnClicked, LV_EVENT_CLICKED, &slot);
+
+        slot.label = lv_label_create(slot.row);
+        lv_label_set_long_mode(slot.label, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(slot.label, 610);
+        lv_obj_set_style_text_color(slot.label, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(slot.label, &lv_font_montserrat_14, 0);
+        lv_obj_align(slot.label, LV_ALIGN_LEFT_MID, 12, 0);
+
+        slot.connectBtn = lv_btn_create(slot.row);
+        lv_obj_set_size(slot.connectBtn, 110, 34);
+        lv_obj_align(slot.connectBtn, LV_ALIGN_RIGHT_MID, -8, 0);
+        lv_obj_set_style_bg_color(slot.connectBtn, lv_color_hex(0x007744), 0);
+        lv_obj_set_style_radius(slot.connectBtn, 8, 0);
+        lv_obj_add_event_cb(slot.connectBtn, StartMenuUI::onConnectBtnClicked, LV_EVENT_CLICKED, &slot);
+
+        slot.connectLabel = lv_label_create(slot.connectBtn);
+        lv_label_set_text(slot.connectLabel, "CONNECT");
+        lv_obj_set_style_text_color(slot.connectLabel, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_center(slot.connectLabel);
+
+        m_nodeRowCount = index + 1;
     }
 
     void setSnifferUi(bool en) {
@@ -388,13 +428,17 @@ private:
     }
 
     static void onNodeBtnClicked(lv_event_t* ev) {
-        const uint8_t nid = (uint8_t)(uintptr_t)lv_event_get_user_data(ev);
+        NodeRowSlot* slot = static_cast<NodeRowSlot*>(lv_event_get_user_data(ev));
+        if (!slot) return;
+        const uint8_t nid = slot->nodeId;
         Serial.printf("[UI] Node row clicked: %u\n", (unsigned)nid);
         if (s_inst && s_inst->m_cbs.onOpenNode) s_inst->m_cbs.onOpenNode(nid);
     }
 
     static void onConnectBtnClicked(lv_event_t* ev) {
-        const uint8_t nid = (uint8_t)(uintptr_t)lv_event_get_user_data(ev);
+        NodeRowSlot* slot = static_cast<NodeRowSlot*>(lv_event_get_user_data(ev));
+        if (!slot) return;
+        const uint8_t nid = slot->nodeId;
         Serial.printf("[UI] CONNECT clicked: %u\n", (unsigned)nid);
         if (s_inst && s_inst->m_cbs.onConnectNode) s_inst->m_cbs.onConnectNode(nid);
     }
@@ -409,6 +453,9 @@ private:
     // Start screen widgets
     lv_obj_t* m_list = nullptr;
     lv_obj_t* m_lblStatus = nullptr;
+    static constexpr size_t MAX_NODE_ROWS = 127;
+    NodeRowSlot m_nodeRows[MAX_NODE_ROWS];
+    size_t m_nodeRowCount = 0;
 
     // Tools widgets
     lv_obj_t* m_btnSniffer = nullptr;

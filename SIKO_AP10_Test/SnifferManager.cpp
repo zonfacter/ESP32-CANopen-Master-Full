@@ -11,8 +11,13 @@ void SnifferManager::begin(const Config& cfg)
     if (_cfg.queueLen < 16) _cfg.queueLen = 16;
     if (_cfg.maxRecentFrames < 16) _cfg.maxRecentFrames = 16;
 
-    _recent.clear();
-    _recent.reserve(_cfg.maxRecentFrames);
+    _recentRing.clear();
+    _recentRing.resize(_cfg.maxRecentFrames);
+    _recentHead = 0;
+    _recentCount = 0;
+    _serialWindowStartMs = 0;
+    _serialWindowCount = 0;
+    _serialSuppressedCount = 0;
 
     if (_q) {
         vQueueDelete(_q);
@@ -49,13 +54,32 @@ void SnifferManager::end()
     }
 
     portENTER_CRITICAL(&_recentMux);
-    _recent.clear();
+    _recentHead = 0;
+    _recentCount = 0;
     portEXIT_CRITICAL(&_recentMux);
 }
 
 void SnifferManager::setEnabled(bool en)
 {
-    _enabled = en;
+    if (_enabled == en) return;
+
+    if (en) {
+        if (_q) xQueueReset(_q);
+        _lastFrameTimeMs = 0;
+        _queueHighWatermark = 0;
+        _enabled = true;
+    } else {
+        _enabled = false;
+        if (_q) xQueueReset(_q);
+    }
+}
+
+void SnifferManager::setSerialOutput(bool en)
+{
+    _serialOutput = en;
+    _serialWindowStartMs = 0;
+    _serialWindowCount = 0;
+    _serialSuppressedCount = 0;
 }
 
 void SnifferManager::processFrame(uint32_t id, uint8_t dlc, const uint8_t* data, bool ext, bool rtr)
@@ -76,6 +100,11 @@ void SnifferManager::processFrame(uint32_t id, uint8_t dlc, const uint8_t* data,
     // Non-blocking enqueue
     if (xQueueSend(_q, &f, 0) != pdTRUE) {
         _droppedCount++;
+    } else {
+        const UBaseType_t waiting = uxQueueMessagesWaiting(_q);
+        if (waiting > _queueHighWatermark) {
+            _queueHighWatermark = (uint16_t)waiting;
+        }
     }
 }
 
@@ -86,19 +115,62 @@ uint32_t SnifferManager::getLastTrafficAgeMs() const
     return (uint32_t)(millis() - last);
 }
 
+uint16_t SnifferManager::getQueueDepth() const
+{
+    if (!_q) return 0;
+    return (uint16_t)uxQueueMessagesWaiting(_q);
+}
+
 std::vector<DecodedFrame> SnifferManager::getRecentFramesCopy()
 {
     portENTER_CRITICAL(&_recentMux);
-    auto copy = _recent;
+    std::vector<DecodedFrame> copy;
+    copy.reserve(_recentCount);
+    const uint16_t cap = (uint16_t)_recentRing.size();
+    if (cap > 0) {
+        const uint16_t start = (_recentCount == cap) ? _recentHead : 0;
+        for (uint16_t i = 0; i < _recentCount; ++i) {
+            copy.push_back(_recentRing[(start + i) % cap]);
+        }
+    }
     portEXIT_CRITICAL(&_recentMux);
     return copy;
+}
+
+uint16_t SnifferManager::copyRecentNewest(DecodedFrame* out, uint16_t maxOut, uint16_t* totalAvailable)
+{
+    portENTER_CRITICAL(&_recentMux);
+    const uint16_t cap = (uint16_t)_recentRing.size();
+    const uint16_t count = _recentCount;
+    if (totalAvailable) *totalAvailable = count;
+
+    uint16_t copied = 0;
+    if (out && maxOut > 0 && cap > 0 && count > 0) {
+        const uint16_t n = (count < maxOut) ? count : maxOut;
+        for (uint16_t i = 0; i < n; ++i) {
+            const uint16_t newestOffset = (uint16_t)(i + 1);
+            const uint16_t idx = (uint16_t)((_recentHead + cap - newestOffset) % cap);
+            out[i] = _recentRing[idx];
+        }
+        copied = n;
+    }
+    portEXIT_CRITICAL(&_recentMux);
+    return copied;
 }
 
 void SnifferManager::clearRecent()
 {
     portENTER_CRITICAL(&_recentMux);
-    _recent.clear();
+    _recentHead = 0;
+    _recentCount = 0;
     portEXIT_CRITICAL(&_recentMux);
+}
+
+void SnifferManager::clearStats()
+{
+    _droppedCount = 0;
+    _lastFrameTimeMs = 0;
+    _queueHighWatermark = getQueueDepth();
 }
 
 void SnifferManager::setNodeIdFilter(uint8_t nodeIdOr0)
@@ -156,6 +228,30 @@ static void printDecodedSerial(const DecodedFrame& df)
         Serial.printf("%02X ", df.raw.data[i]);
     }
     Serial.println();
+}
+
+void SnifferManager::printDecodedSerialThrottled(const DecodedFrame& df)
+{
+    const uint16_t maxPerSecond = _cfg.serialPrintMaxPerSecond;
+    if (maxPerSecond == 0) return;
+
+    const uint32_t now = millis();
+    if (_serialWindowStartMs == 0 || now - _serialWindowStartMs >= 1000) {
+        if (_serialSuppressedCount > 0) {
+            Serial.printf("[SNIFF] Serial output suppressed %lu frame(s)\n",
+                          (unsigned long)_serialSuppressedCount);
+        }
+        _serialWindowStartMs = now;
+        _serialWindowCount = 0;
+        _serialSuppressedCount = 0;
+    }
+
+    if (_serialWindowCount < maxPerSecond) {
+        printDecodedSerial(df);
+        _serialWindowCount++;
+    } else {
+        _serialSuppressedCount++;
+    }
 }
 
 const char* SnifferManager::classifyType(const SniffFrame& f, uint16_t baseId, uint8_t nodeId)
@@ -245,13 +341,15 @@ void SnifferManager::decodeAndStore(const SniffFrame& f)
     if (!passFilters(df)) return;
 
     portENTER_CRITICAL(&_recentMux);
-    if (_recent.size() >= _cfg.maxRecentFrames) {
-        _recent.erase(_recent.begin());
+    const uint16_t cap = (uint16_t)_recentRing.size();
+    if (cap > 0) {
+        _recentRing[_recentHead] = df;
+        _recentHead = (uint16_t)((_recentHead + 1) % cap);
+        if (_recentCount < cap) _recentCount++;
     }
-    _recent.push_back(df);
     portEXIT_CRITICAL(&_recentMux);
 
     if (_serialOutput) {
-        printDecodedSerial(df);
+        printDecodedSerialThrottled(df);
     }
 }
