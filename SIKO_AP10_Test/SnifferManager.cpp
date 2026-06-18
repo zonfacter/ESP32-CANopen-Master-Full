@@ -11,8 +11,10 @@ void SnifferManager::begin(const Config& cfg)
     if (_cfg.queueLen < 16) _cfg.queueLen = 16;
     if (_cfg.maxRecentFrames < 16) _cfg.maxRecentFrames = 16;
 
-    _recent.clear();
-    _recent.reserve(_cfg.maxRecentFrames);
+    _recentRing.clear();
+    _recentRing.resize(_cfg.maxRecentFrames);
+    _recentHead = 0;
+    _recentCount = 0;
 
     if (_q) {
         vQueueDelete(_q);
@@ -49,7 +51,8 @@ void SnifferManager::end()
     }
 
     portENTER_CRITICAL(&_recentMux);
-    _recent.clear();
+    _recentHead = 0;
+    _recentCount = 0;
     portEXIT_CRITICAL(&_recentMux);
 }
 
@@ -89,7 +92,15 @@ uint32_t SnifferManager::getLastTrafficAgeMs() const
 std::vector<DecodedFrame> SnifferManager::getRecentFramesCopy()
 {
     portENTER_CRITICAL(&_recentMux);
-    auto copy = _recent;
+    std::vector<DecodedFrame> copy;
+    copy.reserve(_recentCount);
+    const uint16_t cap = (uint16_t)_recentRing.size();
+    if (cap > 0) {
+        const uint16_t start = (_recentCount == cap) ? _recentHead : 0;
+        for (uint16_t i = 0; i < _recentCount; ++i) {
+            copy.push_back(_recentRing[(start + i) % cap]);
+        }
+    }
     portEXIT_CRITICAL(&_recentMux);
     return copy;
 }
@@ -97,7 +108,8 @@ std::vector<DecodedFrame> SnifferManager::getRecentFramesCopy()
 void SnifferManager::clearRecent()
 {
     portENTER_CRITICAL(&_recentMux);
-    _recent.clear();
+    _recentHead = 0;
+    _recentCount = 0;
     portEXIT_CRITICAL(&_recentMux);
 }
 
@@ -245,10 +257,12 @@ void SnifferManager::decodeAndStore(const SniffFrame& f)
     if (!passFilters(df)) return;
 
     portENTER_CRITICAL(&_recentMux);
-    if (_recent.size() >= _cfg.maxRecentFrames) {
-        _recent.erase(_recent.begin());
+    const uint16_t cap = (uint16_t)_recentRing.size();
+    if (cap > 0) {
+        _recentRing[_recentHead] = df;
+        _recentHead = (uint16_t)((_recentHead + 1) % cap);
+        if (_recentCount < cap) _recentCount++;
     }
-    _recent.push_back(df);
     portEXIT_CRITICAL(&_recentMux);
 
     if (_serialOutput) {

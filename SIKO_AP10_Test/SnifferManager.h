@@ -103,8 +103,10 @@ private:
     volatile uint32_t _droppedCount = 0;
     volatile uint32_t _lastFrameTimeMs = 0;
 
-    // recent frames
-    std::vector<DecodedFrame> _recent;
+    // recent frames: fixed-size circular buffer, copied out as oldest->newest
+    std::vector<DecodedFrame> _recentRing;
+    uint16_t _recentHead = 0;   // next write position
+    uint16_t _recentCount = 0;  // valid entries
     portMUX_TYPE _recentMux = portMUX_INITIALIZER_UNLOCKED;
 
     // filters
