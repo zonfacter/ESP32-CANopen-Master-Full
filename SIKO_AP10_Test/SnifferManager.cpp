@@ -58,7 +58,16 @@ void SnifferManager::end()
 
 void SnifferManager::setEnabled(bool en)
 {
-    _enabled = en;
+    if (_enabled == en) return;
+
+    if (en) {
+        if (_q) xQueueReset(_q);
+        _lastFrameTimeMs = 0;
+        _enabled = true;
+    } else {
+        _enabled = false;
+        if (_q) xQueueReset(_q);
+    }
 }
 
 void SnifferManager::processFrame(uint32_t id, uint8_t dlc, const uint8_t* data, bool ext, bool rtr)
