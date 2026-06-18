@@ -45,6 +45,9 @@ struct NodeDetail_Callbacks {
     // Read standard objects 1018h (identity) + 1001h (error register) via SDO
     std::function<void(uint8_t nodeId)> onReadInfo = nullptr;
 
+    // Set baudrate (device-specific method chosen by the app from the node type)
+    std::function<void(uint8_t nodeId, uint32_t baud)> onSetBaud = nullptr;
+
     // Config (AP04): set Node-ID via SDO + ResetComm
     std::function<void(uint8_t nodeId, uint8_t newNodeId)> onSetNodeId = nullptr;
 };
@@ -185,6 +188,32 @@ public:
         m_btnResetNode = makeBtn("RESET NODE", lv_color_hex(0x666666), x, y, w, h, NodeDetailUI::onResetNodeClicked);
         m_btnResetComm = makeBtn("RESET COMM", lv_color_hex(0x666666), x + (w + gap), y, w, h, NodeDetailUI::onResetCommClicked);
 
+        // Baud config row (device-specific; e.g. Bosch Rexroth ECODRIVE via 0x3FEF:07).
+        y += h + gap;
+        lv_obj_t* lblB = lv_label_create(m_content);
+        lv_label_set_text(lblB, "Set Baud:");
+        lv_obj_set_style_text_color(lblB, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(lblB, &lv_font_montserrat_14, 0);
+        lv_obj_set_pos(lblB, x, y + 14);
+        makeBtn("125k", lv_color_hex(0x0066CC), x + 110, y, 110, 48, NodeDetailUI::onBaud125Clicked);
+        makeBtn("250k", lv_color_hex(0x0066CC), x + 228, y, 110, 48, NodeDetailUI::onBaud250Clicked);
+        makeBtn("500k", lv_color_hex(0x0066CC), x + 346, y, 110, 48, NodeDetailUI::onBaud500Clicked);
+        makeBtn("1M",   lv_color_hex(0x0066CC), x + 464, y, 110, 48, NodeDetailUI::onBaud1MClicked);
+        m_lblBaudStatus = lv_label_create(m_content);
+        lv_label_set_text(m_lblBaudStatus, "");
+        lv_obj_set_style_text_color(m_lblBaudStatus, lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_font(m_lblBaudStatus, &lv_font_montserrat_14, 0);
+        lv_obj_set_pos(m_lblBaudStatus, x, y + 56);
+
+        // Live device status line (e.g. decoded Rexroth fieldbus status word)
+        m_lblDevStatus = lv_label_create(m_content);
+        lv_label_set_text(m_lblDevStatus, "");
+        lv_obj_set_style_text_color(m_lblDevStatus, lv_color_hex(0x66CCFF), 0);
+        lv_obj_set_style_text_font(m_lblDevStatus, &lv_font_montserrat_16, 0);
+        lv_obj_set_pos(m_lblDevStatus, x, y + 84);
+        lv_label_set_long_mode(m_lblDevStatus, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(m_lblDevStatus, 760);
+
         // On-screen numeric keypad (sibling of m_content so it never scrolls);
         // hidden until the Node-ID field is focused, bottom-aligned.
         m_kb = lv_keyboard_create(m_screen);
@@ -317,6 +346,54 @@ private:
         lv_obj_scroll_to_y(s_inst->m_content, 0, LV_ANIM_ON);
     }
 
+    static void emitBaud(uint32_t baud) {
+        if (s_inst && s_inst->m_cbs.onSetBaud) s_inst->m_cbs.onSetBaud(s_inst->m_info.nodeId, baud);
+    }
+    static void onBaud125Clicked(lv_event_t*) { emitBaud(125000); }
+    static void onBaud250Clicked(lv_event_t*) { emitBaud(250000); }
+    static void onBaud500Clicked(lv_event_t*) { emitBaud(500000); }
+    static void onBaud1MClicked(lv_event_t*)  { emitBaud(1000000); }
+
+public:
+    void setBaudStatus(const char* text, bool ok) {
+        if (!m_lblBaudStatus) return;
+        lv_label_set_text(m_lblBaudStatus, text ? text : "");
+        lv_obj_set_style_text_color(m_lblBaudStatus, lv_color_hex(ok ? 0x33DD66 : 0xFF6666), 0);
+    }
+
+    // Live device status line (decoded). kind: 0=info(blue), 1=ok(green), 2=warn(red).
+    void setDeviceStatus(const char* text, uint8_t kind = 0) {
+        if (!m_lblDevStatus) return;
+        const uint32_t col = (kind == 1) ? 0x33DD66 : (kind == 2) ? 0xFF6666 : 0x66CCFF;
+        lv_obj_set_style_text_color(m_lblDevStatus, lv_color_hex(col), 0);
+        lv_label_set_text(m_lblDevStatus, text ? text : "");
+    }
+
+    // Prominent confirmation that the baud write succeeded and a power-cycle is
+    // required. baudKbps = new rate in kBit/s (for the message), 0 = omit.
+    void showBaudWrittenMsg(uint32_t baudKbps) {
+        static const char* btns[] = { "OK", "" };
+        char txt[200];
+        if (baudKbps)
+            snprintf(txt, sizeof(txt),
+                     "Neue Baudrate %lu kBit/s erfolgreich geschrieben.\n\n"
+                     "Bitte den Antrieb AUS- und wieder EINSCHALTEN\n"
+                     "(Power-Cycle), damit die Aenderung aktiv wird.",
+                     (unsigned long)baudKbps);
+        else
+            snprintf(txt, sizeof(txt),
+                     "Baudrate erfolgreich geschrieben.\n\n"
+                     "Bitte den Antrieb AUS- und wieder EINSCHALTEN (Power-Cycle).");
+        lv_obj_t* mbox = lv_msgbox_create(nullptr, LV_SYMBOL_OK "  Baudrate gesetzt", txt, btns, false);
+        lv_obj_center(mbox);
+        lv_obj_add_event_cb(mbox, NodeDetailUI::onMsgBoxOk, LV_EVENT_VALUE_CHANGED, nullptr);
+    }
+private:
+    static void onMsgBoxOk(lv_event_t* e) {
+        lv_msgbox_close(lv_event_get_current_target(e));
+    }
+
+
     // Render the product-code as ASCII if its bytes are printable (e.g. AP04 = "CAN").
     static void productAscii(uint32_t pc, char* out, size_t n) {
         if (!out || n == 0) return;
@@ -378,6 +455,9 @@ private:
     lv_obj_t* m_lblNode = nullptr;
     lv_obj_t* m_lblState = nullptr;
     lv_obj_t* m_lblLast = nullptr;
+
+    lv_obj_t* m_lblBaudStatus = nullptr;
+    lv_obj_t* m_lblDevStatus = nullptr;
 
     // Identity + error-register widgets
     lv_obj_t* m_lblVendor = nullptr;

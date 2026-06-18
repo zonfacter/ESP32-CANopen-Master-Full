@@ -95,6 +95,7 @@ static AP10_UI ap04Ui; // reuse the existing AP10/AP04 UI page as AP04 page
 static CanopenMasterController master(&canDriver);
 
 static uint8_t selectedNodeId = 0;
+static bool nodeDetailActive = false;
 
 // LSS master (CiA 305) for Node-ID / baudrate configuration
 static LssMaster lssMaster(&canDriver);
@@ -128,6 +129,69 @@ static uint8_t stdReadStep = 0;
 static uint32_t stdReadNextMs = 0;
 static uint8_t stdErrReg = 0;
 static bool stdErrRegValid = false;
+
+// Bosch Rexroth ECODRIVE baud config.
+// Rexroth maps drive parameters to CANopen objects: P-params -> index 0x3000+IDN,
+// operation data on subindex 7. So:
+//   P-0-4079 "Fieldbus: Baud rate"   -> 0x3FEF:00  (4 byte, unit kBaud x 0.1,
+//                                       i.e. value = baud/100; 500k -> 5000;
+//                                       editable only in phase 2, stored in EEPROM)
+//   P-0-4078 "Fieldbus status word"  -> 0x3FEE:07  (phase in bits 0,1)
+static bool ecoWriteRunning = false;
+static uint8_t ecoWriteStep = 0;
+static uint32_t ecoWriteNextMs = 0;
+static uint8_t ecoWriteNode = 0;
+static uint32_t ecoBaudVal = 0;        // value to write = baud/100 (kBaud x10)
+static bool ecoBaudOk = false;
+static bool     ecoCurBaudOk = false;
+static uint32_t ecoCurBaudCode = 0;
+static bool     ecoStatusOk = false;
+static uint16_t ecoStatusWord = 0;
+static bool     ecoPhase2 = false;     // ready to write params (already phase 2, or C400 accepted)
+static bool     ecoC400Ok = false;     // C400 (P-0-4023) phase-2 transition command accepted
+
+// P-0-4079 is kBaud with 1 decimal -> value = kBaud*10 = baud/100.
+static bool ecodriveBaudValue(uint32_t baud, uint32_t& v) {
+    switch (baud) {
+        case 50000: case 100000: case 125000:
+        case 250000: case 500000: case 1000000:
+            v = baud / 100; return true;   // e.g. 500000 -> 5000
+        default:
+            return false;
+    }
+}
+
+// Decode the Rexroth fieldbus status word P-0-4078 (0x3FEE:00) into readable text.
+//   bits 0,1 = phase (00=P2/param, 01=P3, 10=P4/operating)
+//   bit3 standstill, bit4 in position, bit7 drive halt
+//   bit11 class3 msg, bit12 class2 warn, bit13 class1 error
+//   bits 14,15 = ready (00 not ready, 01 ready power-on, 10 ready torque-free, 11 operating)
+static void ecodriveStatusText(uint16_t sw, char* out, size_t n) {
+    if (!out || n == 0) return;
+    const char* phase = ((sw & 3) == 0) ? "P2" : ((sw & 3) == 1) ? "P3" : ((sw & 3) == 2) ? "P4" : "P?";
+    const char* ready;
+    switch ((sw >> 14) & 3) {
+        case 0:  ready = "nicht bereit"; break;
+        case 1:  ready = "bereit (Power-On)"; break;
+        case 2:  ready = "betriebsbereit, momentenfrei"; break;
+        default: ready = "in Betrieb (Moment)"; break;
+    }
+    int p = snprintf(out, n, "Status 0x%04X | %s | %s", (unsigned)sw, phase, ready);
+    auto add = [&](const char* s){ if (p > 0 && p < (int)n - 1) p += snprintf(out + p, n - p, " | %s", s); };
+    if (sw & (1u << 3))  add("Stillstand");
+    if (sw & (1u << 4))  add("In-Pos");
+    if (sw & (1u << 7))  add("Drive-Halt");
+    if (sw & (1u << 13)) add("C1-Fehler");
+    else if (sw & (1u << 12)) add("C2-Warnung");
+    else if (sw & (1u << 11)) add("C3-Meldung");
+}
+
+// Live ECODRIVE status poll state (callback writes plain values only; the label
+// is updated from loop context under the LVGL lock).
+static uint32_t ecoLivePollNextMs = 0;
+static volatile uint16_t ecoLiveStatusWord = 0;
+static volatile bool     ecoLiveStatusValid = false;
+static volatile bool     ecoLiveStatusNew = false;
 
 // AP04 page/device state
 static SikoAP04* ap04Dev = nullptr;
@@ -304,6 +368,7 @@ static NodeDetail_Info makeNodeInfo(uint8_t nid)
         info.typeText  = (dn.known == KnownDeviceType::SIKO_AP04) ? "SIKO AP04" :
                          (dn.known == KnownDeviceType::SIKO_AP10) ? "SIKO AP10" :
                          (dn.known == KnownDeviceType::Dunker_75CI) ? "Dunker 75CI" :
+                         (dn.known == KnownDeviceType::BoschRexroth_ECODRIVE) ? "Bosch ECODRIVE" :
                          "Unknown";
     }
 
@@ -341,6 +406,7 @@ static void refreshStartMenuList()
             case KnownDeviceType::SIKO_AP04:  rows[n].typeText = "SIKO AP04"; break;
             case KnownDeviceType::SIKO_AP10:  rows[n].typeText = "SIKO AP10"; break;
             case KnownDeviceType::Dunker_75CI:rows[n].typeText = "Dunker 75CI"; break;
+            case KnownDeviceType::BoschRexroth_ECODRIVE: rows[n].typeText = "Bosch ECODRIVE"; break;
             default:                          rows[n].typeText = "Unknown"; break;
         }
 
@@ -625,8 +691,10 @@ void setup()
     cbs.onOpenNode = [](uint8_t nodeId){
         Serial.printf("[UI] Node selected: %u -> open detail\n", (unsigned)nodeId);
         selectedNodeId = nodeId;
+        nodeDetailActive = true;
         lvgl_port_lock(-1);
         refreshNodeDetail();
+        nodeUi.setDeviceStatus("");   // clear stale live status from a previous node
         nodeUi.load();
         lvgl_port_unlock();
     };
@@ -634,12 +702,14 @@ void setup()
     cbs.onConnectNode = [](uint8_t nodeId){
         Serial.printf("[UI] CONNECT node: %u\n", (unsigned)nodeId);
         selectedNodeId = nodeId;
+        nodeDetailActive = true;
 
         const KnownDeviceType kt = KnownDeviceType::Unknown;
         master.connectNode(nodeId, kt);
 
         lvgl_port_lock(-1);
         refreshNodeDetail();
+        nodeUi.setDeviceStatus("");
         nodeUi.load();
         lvgl_port_unlock();
     };
@@ -675,6 +745,8 @@ void setup()
     NodeDetail_Callbacks ncbs;
     ncbs.onBack = [](){
         Serial.println("[UI] Back to start menu");
+        nodeDetailActive = false;
+        selectedNodeId = 0;   // stop the live status poll when leaving node detail
         lv_scr_load_anim(startUi.screen(), LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
     };
 
@@ -703,6 +775,31 @@ void setup()
         stdReadStep = 0;
         stdReadNextMs = millis();
         Serial.printf("[STD] Read 1018h+1001h for node %u\n", (unsigned)nodeId);
+    };
+
+    // Set baudrate - device-specific. Bosch Rexroth ECODRIVE: P-0-4079 @ 0x3FEF:00
+    // (own value table) + save 0x1010:01, then power-cycle.
+    ncbs.onSetBaud = [](uint8_t nodeId, uint32_t baud){
+        const auto& dn = master.node(nodeId);
+        if (dn.known != KnownDeviceType::BoschRexroth_ECODRIVE) {
+            nodeUi.setBaudStatus("Baud-Setzen fuer diesen Typ (noch) nicht hinterlegt", false);
+            return;
+        }
+        uint32_t v = 0;
+        if (!ecodriveBaudValue(baud, v)) { nodeUi.setBaudStatus("Baud nicht unterstuetzt", false); return; }
+        if (ecoWriteRunning || stdReadRunning || stdSdo.isBusy()) { nodeUi.setBaudStatus("SDO busy - kurz warten", false); return; }
+        ecoWriteNode = nodeId;
+        ecoBaudVal   = v;
+        stdSdo.setNodeId(nodeId);
+        stdSdo.setTimeout(600);
+        ecoWriteRunning = true;
+        ecoWriteStep = 0;
+        ecoPhase2 = false;
+        ecoC400Ok = false;
+        ecoWriteNextMs = millis();
+        Serial.printf("[ECO] node %u: set baud %lu -> P-0-4079=%lu (0x3FEF:00, 4B)\n",
+                      (unsigned)nodeId, (unsigned long)baud, (unsigned long)v);
+        nodeUi.setBaudStatus("NMT Pre-Op -> C400 -> P-0-4079 (0x3FEF:00) schreiben ...", true);
     };
 
     ncbs.onSetNodeId = [](uint8_t nodeId, uint8_t newNodeId){
@@ -908,7 +1005,8 @@ void loop()
                 const char* typeStr =
                     (dn.known == KnownDeviceType::SIKO_AP04)   ? "SIKO AP04"   :
                     (dn.known == KnownDeviceType::SIKO_AP10)   ? "SIKO AP10"   :
-                    (dn.known == KnownDeviceType::Dunker_75CI) ? "Dunker 75CI" : "Unknown";
+                    (dn.known == KnownDeviceType::Dunker_75CI) ? "Dunker 75CI" :
+                    (dn.known == KnownDeviceType::BoschRexroth_ECODRIVE) ? "Bosch ECODRIVE" : "Unknown";
 
                 Serial.printf("[IDENT-ALL] Node %u: vendor=0x%08lX product=0x%08lX rev=0x%08lX serial=0x%08lX -> %s\n",
                               (unsigned)identifyAllNode,
@@ -1013,6 +1111,215 @@ void loop()
         }
     }
 
+    // Bosch Rexroth ECODRIVE baud STATE MACHINE (objects: P-param -> 0x3000+IDN,
+    // S-param -> 0x2000+IDN). HARDWARE-VERIFIED on an EcoDrive Cs (FGP firmware):
+    // the operation data is on SUBINDEX 0 (not 7), and the readiness gate is an
+    // ACCEPTED C400 command (P-0-4023) -- the status-word phase bits do NOT reach
+    // 00 even when the write is accepted. We never WRITE P-0-4077 (= master control
+    // word S-0-0134; bits 14/15 are drive on/enable -> motion risk); we only read
+    // it. Hardware drive-enable must be off (else C400 is rejected).
+    if (ecoWriteRunning && !stdSdo.isBusy() && (int32_t)(millis() - ecoWriteNextMs) >= 0) {
+        switch (ecoWriteStep) {
+            case 0:  // enter CANopen Pre-Operational (safe; stops PDOs, no enable)
+                ecoWriteStep = 1;
+                { uint8_t nmt[2] = { 0x80, ecoWriteNode }; canDriver.sendFrame(0x000, nmt, 2); }
+                Serial.printf("[ECO] NMT Pre-Operational -> node %u\n", (unsigned)ecoWriteNode);
+                ecoWriteNextMs = millis() + 300;
+                break;
+            case 1:  // P-0-4084 profile type
+                ecoWriteStep = 2;
+                stdSdo.readAsync(0x3FF4, 0x00, [](SdoResult r, uint32_t v){
+                    Serial.printf("[ECO] P-0-4084 profile (0x3FF4:00) res=%u val=0x%08lX\n", (unsigned)r, (unsigned long)v); });
+                ecoWriteNextMs = millis() + 80;
+                break;
+            case 2:  // P-0-4086 command communication status/config
+                ecoWriteStep = 3;
+                stdSdo.readAsync(0x3FF6, 0x00, [](SdoResult r, uint32_t v){
+                    Serial.printf("[ECO] P-0-4086 cmd-comm (0x3FF6:00) res=%u val=0x%08lX\n", (unsigned)r, (unsigned long)v); });
+                ecoWriteNextMs = millis() + 80;
+                break;
+            case 3:  // P-0-4077 fieldbus control word (READ ONLY - never written)
+                ecoWriteStep = 4;
+                stdSdo.readAsync(0x3FED, 0x00, [](SdoResult r, uint32_t v){
+                    Serial.printf("[ECO] P-0-4077 ctrlword (0x3FED:00) res=%u val=0x%04X (enable bits 14/15=%u)\n",
+                                  (unsigned)r, (unsigned)(v & 0xFFFF), (unsigned)((v >> 14) & 0x3)); });
+                ecoWriteNextMs = millis() + 80;
+                break;
+            case 4:  // S-0-0390 diagnostic message number
+                ecoWriteStep = 5;
+                stdSdo.readAsync(0x2186, 0x00, [](SdoResult r, uint32_t v){
+                    Serial.printf("[ECO] S-0-0390 diag-no (0x2186:00) res=%u val=0x%08lX\n", (unsigned)r, (unsigned long)v); });
+                ecoWriteNextMs = millis() + 80;
+                break;
+            case 5:  // P-0-4079 current baud
+                ecoWriteStep = 6;
+                ecoCurBaudOk = false;
+                stdSdo.readAsync(0x3FEF, 0x00, [](SdoResult r, uint32_t v){
+                    ecoCurBaudOk = (r == SDO_OK); ecoCurBaudCode = v;
+                    Serial.printf("[ECO] P-0-4079 baud (0x3FEF:00) READ res=%u val=%lu (kBaud*10)\n", (unsigned)r, (unsigned long)v); });
+                ecoWriteNextMs = millis() + 80;
+                break;
+            case 6:  // P-0-4078 status word (phase bits informational only)
+                ecoWriteStep = 7;
+                ecoStatusOk = false;
+                stdSdo.readAsync(0x3FEE, 0x00, [](SdoResult r, uint32_t v){
+                    ecoStatusOk = (r == SDO_OK); ecoStatusWord = (uint16_t)(v & 0xFFFF);
+                    Serial.printf("[ECO] P-0-4078 status (0x3FEE:00) res=%u val=0x%04X phase=%u\n",
+                                  (unsigned)r, (unsigned)(v & 0xFFFF), (unsigned)(v & 0x3)); });
+                ecoWriteNextMs = millis() + 80;
+                break;
+            case 7:  // already phase 2? else request it via C400 (P-0-4023)
+                if (ecoStatusOk && (ecoStatusWord & 0x0003) == 0x00) {
+                    ecoPhase2 = true;
+                    ecoWriteStep = 11;            // already in parameter mode
+                    ecoWriteNextMs = millis() + 20;
+                } else {
+                    ecoC400Ok = false;
+                    stdSdo.writeAsync(0x3FB7, 0x00, 0x0003, 2, [](SdoResult r, uint32_t){
+                        ecoC400Ok = (r == SDO_OK);
+                        Serial.printf("[ECO] C400 P-0-4023 (0x3FB7:00)=0x0003 start res=%u\n", (unsigned)r); });
+                    ecoWriteStep = 8;
+                    ecoWriteNextMs = millis() + 3000;   // let the drive settle into parameter mode
+                }
+                break;
+            case 8:  // C400 accepted == ready to parameterize (phase bits may stay !=00)
+                if (ecoC400Ok) { ecoPhase2 = true; ecoWriteStep = 11; }
+                else           { ecoWriteStep = 14; }   // C400 rejected -> diagnostics, NO write
+                ecoWriteNextMs = millis() + 20;
+                break;
+            case 11:  // write the new baud -- ONLY when ready (C400 accepted / phase 2) and read ok
+                if (ecoPhase2 && ecoCurBaudOk) {
+                    ecoWriteStep = 12;
+                    ecoBaudOk = false;
+                    stdSdo.writeAsync(0x3FEF, 0x00, ecoBaudVal, 4, [](SdoResult r, uint32_t){
+                        ecoBaudOk = (r == SDO_OK);
+                        Serial.printf("[ECO] P-0-4079 baud (0x3FEF:00) WRITE res=%u\n", (unsigned)r); });
+                    ecoWriteNextMs = millis() + 200;
+                } else {
+                    Serial.printf("[ECO] WRITE uebersprungen (phase2=%d baudReadOk=%d)\n",
+                                  (int)ecoPhase2, (int)ecoCurBaudOk);
+                    ecoWriteStep = 14;
+                    ecoWriteNextMs = millis() + 10;
+                }
+                break;
+            case 12:  // success path: clear the C400 command
+                ecoWriteStep = 13;
+                stdSdo.writeAsync(0x3FB7, 0x00, 0x0000, 2, [](SdoResult r, uint32_t){
+                    Serial.printf("[ECO] C400 clear (0x3FB7:00)=0 res=%u\n", (unsigned)r); });
+                ecoWriteNextMs = millis() + 80;
+                break;
+
+            // ---- Failure path: not ready (C400 rejected) -> NO baud write, log diag ----
+            case 14:
+                ecoWriteStep = 15;
+                stdSdo.readAsync(0x3FEE, 0x00, [](SdoResult r, uint32_t v){
+                    ecoStatusOk = (r == SDO_OK); ecoStatusWord = (uint16_t)(v & 0xFFFF);
+                    Serial.printf("[ECO] FAIL P-0-4078=0x%04X phase=%u\n", (unsigned)(v & 0xFFFF), (unsigned)(v & 0x3)); });
+                ecoWriteNextMs = millis() + 80;
+                break;
+            case 15:
+                ecoWriteStep = 16;
+                stdSdo.readAsync(0x3FED, 0x00, [](SdoResult r, uint32_t v){
+                    Serial.printf("[ECO] FAIL P-0-4077 ctrlword=0x%04X (enable 14/15=%u)\n",
+                                  (unsigned)(v & 0xFFFF), (unsigned)((v >> 14) & 0x3)); });
+                ecoWriteNextMs = millis() + 80;
+                break;
+            case 16:
+                ecoWriteStep = 17;
+                stdSdo.readAsync(0x3FF6, 0x00, [](SdoResult r, uint32_t v){
+                    Serial.printf("[ECO] FAIL P-0-4086 cmd-comm=0x%08lX\n", (unsigned long)v); });
+                ecoWriteNextMs = millis() + 80;
+                break;
+            case 17:
+                ecoWriteStep = 18;
+                stdSdo.readAsync(0x2186, 0x00, [](SdoResult r, uint32_t v){
+                    Serial.printf("[ECO] FAIL S-0-0390 diag-no=0x%08lX\n", (unsigned long)v); });
+                ecoWriteNextMs = millis() + 80;
+                break;
+            case 18:  // clear C400 and finish (no write happened)
+                ecoWriteStep = 19;
+                stdSdo.writeAsync(0x3FB7, 0x00, 0x0000, 2, [](SdoResult r, uint32_t){
+                    Serial.printf("[ECO] C400 clear (0x3FB7:00)=0 res=%u\n", (unsigned)r); });
+                ecoWriteNextMs = millis() + 80;
+                break;
+
+            default: {
+                ecoWriteRunning = false;
+                const char* phase = "?";
+                if (ecoStatusOk) {
+                    switch (ecoStatusWord & 0x0003) {
+                        case 0x00: phase = "Phase2/Param"; break;
+                        case 0x01: phase = "Phase3"; break;
+                        case 0x02: phase = "Phase4/Betrieb"; break;
+                    }
+                }
+                Serial.printf("[ECO] node %u: DONE curBaud=%s%lu phase=%s phase2=%d writeOk=%d\n",
+                              (unsigned)ecoWriteNode, ecoCurBaudOk ? "" : "(?)",
+                              (unsigned long)ecoCurBaudCode, phase, (int)ecoPhase2, (int)ecoBaudOk);
+                char b[80];
+                if (ecoBaudOk)        snprintf(b, sizeof(b), "Baud geschrieben (war %lu) - Power-Cycle!", (unsigned long)ecoCurBaudCode);
+                else if (!ecoPhase2)  snprintf(b, sizeof(b), "Kein Write: nicht bereit / C400 abgelehnt (%s, Log!)", phase);
+                else                  snprintf(b, sizeof(b), "Write in Phase2 abgelehnt | ist=%lu (Log!)", (unsigned long)ecoCurBaudCode);
+                lvgl_port_lock(-1);
+                nodeUi.setBaudStatus(b, ecoBaudOk);
+                if (ecoBaudOk) nodeUi.showBaudWrittenMsg((uint32_t)(ecoBaudVal / 10));  // kBaud*10 -> kBit/s
+                lvgl_port_unlock();
+                break;
+            }
+        }
+    }
+
+    // Live ECODRIVE status line on the standard node-detail page.
+    if (ecoLiveStatusNew) {
+        const bool valid = ecoLiveStatusValid;
+        const uint16_t sw = ecoLiveStatusWord;
+        ecoLiveStatusNew = false;
+
+        char text[160];
+        uint8_t kind = 0;
+        if (valid) {
+            ecodriveStatusText(sw, text, sizeof(text));
+            if (sw & ((1u << 13) | (1u << 12))) kind = 2;       // error/warning
+            else if (((sw >> 14) & 0x3) >= 1) kind = 1;         // ready
+        } else {
+            snprintf(text, sizeof(text), "Statuswort P-0-4078 nicht lesbar");
+            kind = 2;
+        }
+
+        if (nodeDetailActive && selectedNodeId >= 1 && selectedNodeId <= 127) {
+            const auto& dn = master.node(selectedNodeId);
+            if (dn.known == KnownDeviceType::BoschRexroth_ECODRIVE) {
+                lvgl_port_lock(-1);
+                nodeUi.setDeviceStatus(text, kind);
+                lvgl_port_unlock();
+            }
+        }
+    }
+
+    if (nodeDetailActive
+        && selectedNodeId >= 1 && selectedNodeId <= 127
+        && !stdReadRunning
+        && !ecoWriteRunning
+        && !identifyAllRunning
+        && !pingScanRunning
+        && !scanRunning
+        && !stdSdo.isBusy()
+        && (int32_t)(now - ecoLivePollNextMs) >= 0) {
+        const auto& dn = master.node(selectedNodeId);
+        if (dn.known == KnownDeviceType::BoschRexroth_ECODRIVE) {
+            stdSdo.setNodeId(selectedNodeId);
+            stdSdo.setTimeout(350);
+            stdSdo.readAsync(0x3FEE, 0x00, [](SdoResult r, uint32_t v){
+                ecoLiveStatusValid = (r == SDO_OK);
+                ecoLiveStatusWord = (uint16_t)(v & 0xFFFF);
+                ecoLiveStatusNew = true;
+            });
+            ecoLivePollNextMs = now + 1000;
+        } else {
+            ecoLivePollNextMs = now + 1000;
+        }
+    }
+
     // Deferred UI navigation (LVGL)
     if (navPendingUiSwitch) {
         navPendingUiSwitch = false;
@@ -1020,7 +1327,9 @@ void loop()
         refreshStartMenuList();
         lv_scr_load_anim(startUi.screen(), LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
         if (navOpenNodeDetail && selectedNodeId >= 1 && selectedNodeId <= 127) {
+            nodeDetailActive = true;
             refreshNodeDetail();
+            nodeUi.setDeviceStatus("");
             nodeUi.load();
         }
         lvgl_port_unlock();
@@ -1050,6 +1359,7 @@ void loop()
         if (!dn.identifyInProgress && dn.known == KnownDeviceType::SIKO_AP04) {
             ap04PageLoaded = true;
             ap04UiIsActive = true;
+            nodeDetailActive = false;
 
             if (!ap04Dev) {
                 ap04Dev = new SikoAP04(&canDriver, selectedNodeId);
@@ -1081,6 +1391,7 @@ void loop()
 
                 ap04UiIsActive = false;
                 ap04PageLoaded = false;
+                nodeDetailActive = false;
                 ap04Dev = nullptr;
 
                 navOpenNodeDetail = cfg.navOpenNodeDetail;
@@ -1105,6 +1416,7 @@ void loop()
         const auto& dn = master.node(selectedNodeId);
         if (!dn.identifyInProgress && dn.known == KnownDeviceType::Dunker_75CI) {
             dunkerPageLoaded = true;
+            nodeDetailActive = false;
 
             // Reuse one heap object across connects (rebind -> no leak, no RX race)
             if (!dunkerDev) dunkerDev = new DunkerDrive(&canDriver, selectedNodeId);
@@ -1118,6 +1430,7 @@ void loop()
                 Serial.println("[UI] Dunker: back to main");
                 dunkerUiIsActive = false;   // stop RX processing BEFORE leaving
                 dunkerPageLoaded = false;
+                nodeDetailActive = false;
                 // Clear the selection so the auto-route block does not immediately
                 // recreate the Dunker page (and leak LVGL screens) on the same pass.
                 selectedNodeId = 0;
