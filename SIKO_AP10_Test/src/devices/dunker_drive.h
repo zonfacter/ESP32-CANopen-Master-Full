@@ -139,6 +139,14 @@ public:
         m_data.brakeConfigured = (m_brakeIndex != 0);
     }
 
+    void deactivate() {
+        m_sdo.cancel();
+        m_qHead = m_qTail = 0;
+        m_pollIdx = 0;
+        m_nextPollMs = 0;
+        m_data.connected = false;
+    }
+
     // -----------------------------------------------------------------------
     // M4: DS402 state-machine commands (Controlword)
     // -----------------------------------------------------------------------

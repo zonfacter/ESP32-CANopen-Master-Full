@@ -109,6 +109,12 @@ public:
     SdoResult getLastResult()  const { return m_lastResult; }
     uint32_t  getLastValue()   const { return m_lastValue; }
 
+    void cancel(SdoResult result = SDO_TIMEOUT) {
+        m_pending = false;
+        m_lastResult = result;
+        m_callback = nullptr;
+    }
+
     void setCallback(std::function<void(SdoResult, uint32_t)> cb) {
         m_callback = cb;
     }

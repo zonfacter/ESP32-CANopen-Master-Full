@@ -500,6 +500,7 @@ public:
     }
 
     void disconnect() {
+        if (m_sdo) m_sdo->cancel();
         setMode(MasterMode::Idle);
     }
 

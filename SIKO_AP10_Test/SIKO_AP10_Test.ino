@@ -883,9 +883,11 @@ void loop()
         // Dunker page teardown (object is reused via rebind(), so keep the pointer)
         dunkerUiIsActive = false;
         dunkerPageLoaded = false;
+        if (dunkerDev) dunkerDev->deactivate();
 
         master.disconnect();
         navPendingDisconnect = false;
+        Serial.println("[APP] Deferred disconnect done");
     }
 
     // Deferred reconnect after node-id change
@@ -1333,6 +1335,7 @@ void loop()
     // Deferred UI navigation (LVGL)
     if (navPendingUiSwitch) {
         navPendingUiSwitch = false;
+        Serial.println("[APP] Deferred UI switch -> start menu");
         lvgl_port_lock(-1);
         refreshStartMenuList();
         lv_scr_load_anim(startUi.screen(), LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
@@ -1343,6 +1346,7 @@ void loop()
             nodeUi.load();
         }
         lvgl_port_unlock();
+        Serial.println("[APP] Deferred UI switch done");
     }
 
     // Prevent AP04 keep-alive while navigating
