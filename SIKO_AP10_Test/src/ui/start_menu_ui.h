@@ -5,7 +5,7 @@
  *
  * Screen 1: Start
  *  - Auto-Scan Baud
- *  - Node list with row click + CONNECT
+ *  - Node list: row click and CONNECT both connect
  *  - Button: TOOLS
  *
  * Screen 2: Tools
@@ -431,8 +431,8 @@ private:
         NodeRowSlot* slot = static_cast<NodeRowSlot*>(lv_event_get_user_data(ev));
         if (!slot) return;
         const uint8_t nid = slot->nodeId;
-        Serial.printf("[UI] Node row clicked: %u\n", (unsigned)nid);
-        if (s_inst && s_inst->m_cbs.onOpenNode) s_inst->m_cbs.onOpenNode(nid);
+        Serial.printf("[UI] Node row connect: %u\n", (unsigned)nid);
+        if (s_inst && s_inst->m_cbs.onConnectNode) s_inst->m_cbs.onConnectNode(nid);
     }
 
     static void onConnectBtnClicked(lv_event_t* ev) {
