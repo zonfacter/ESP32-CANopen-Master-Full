@@ -115,6 +115,35 @@ public:
 
     bool created() const { return m_screen != nullptr; }
 
+    void destroy() {
+        if (m_screen) lv_obj_del(m_screen);
+        m_screen = nullptr;
+        m_lblTitle = nullptr;
+        m_motCont = nullptr;
+        m_lblStatusword = nullptr;
+        m_lblState = nullptr;
+        m_lblFlags = nullptr;
+        m_lblCw = nullptr;
+        m_lblMode = nullptr;
+        m_lblActPos = nullptr;
+        m_lblActVel = nullptr;
+        m_taTarget = nullptr;
+        m_taVel = nullptr;
+        m_kb = nullptr;
+        m_lblDi = nullptr;
+        m_lblBrake = nullptr;
+        for (uint8_t i = 0; i < 4; ++i) {
+            m_outBtn[i] = nullptr;
+            m_outState[i] = false;
+        }
+        m_lblCfgNode = nullptr;
+        m_btnCfgB125 = nullptr;
+        m_btnCfgB250 = nullptr;
+        m_btnCfgB500 = nullptr;
+        m_lblLssStatus = nullptr;
+        if (s_inst == this) s_inst = nullptr;
+    }
+
     // Rebind the (already created) page to another node without recreating it.
     void setNode(uint8_t nodeId) {
         m_nodeId = nodeId;

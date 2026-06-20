@@ -106,6 +106,10 @@ static DunkerUI    dunkerUi;
 static DunkerDrive* dunkerDev = nullptr;
 static bool        dunkerPageLoaded = false;
 static bool        dunkerUiIsActive = false;
+static bool        dunkerDestroyAfterHome = false;
+static uint32_t    postReturnTraceUntilMs = 0;
+static uint32_t    postReturnLastTraceMs = 0;
+static uint8_t     postReturnLastStage = 0xFF;
 
 // SDO ping scan (1..32) on the currently selected baud (no baud switching)
 static bool pingScanRunning = false;
@@ -367,6 +371,29 @@ static bool lockLvglUi(const char* context, int timeoutMs = 50)
         Serial.printf("[LVGL] WARN: lock timeout in %s\n", context ? context : "?");
     }
     return false;
+}
+
+static void tracePostReturn(uint8_t stage, const char* label)
+{
+    const uint32_t now = millis();
+    if ((int32_t)(now - postReturnTraceUntilMs) >= 0) return;
+    if (now - postReturnLastTraceMs < 250) {
+        postReturnLastStage = stage;
+        return;
+    }
+
+    postReturnLastStage = stage;
+    postReturnLastTraceMs = now;
+    Serial.printf("[TRACE] post-return stage=%u %s mode=%u sel=%u ui(n=%u ap=%u du=%u) nav(d=%u s=%u)\n",
+                  (unsigned)stage,
+                  label ? label : "?",
+                  (unsigned)master.mode(),
+                  (unsigned)selectedNodeId,
+                  nodeDetailActive ? 1 : 0,
+                  ap04UiIsActive ? 1 : 0,
+                  dunkerUiIsActive ? 1 : 0,
+                  navPendingDisconnect ? 1 : 0,
+                  navPendingUiSwitch ? 1 : 0);
 }
 
 static NodeDetail_Info makeNodeInfo(uint8_t nid)
@@ -858,12 +885,15 @@ void setup()
 void loop()
 {
     const uint32_t now = millis();
+    tracePostReturn(1, "loop-top");
 
     // CAN/TWAI health service: completes bus-off recovery and performs a hard
     // re-init if the controller does not recover on its own.
+    tracePostReturn(2, "can-service");
     canDriver.service();
 
     // Scan state machine tick (+ active SDO probing per baud)
+    tracePostReturn(3, "scan");
     scanActiveProbe(now);
     scanTick(now);
 
@@ -886,6 +916,7 @@ void loop()
     }
 
     // Deferred disconnect BEFORE master.update()
+    tracePostReturn(4, "deferred-disconnect");
     if (navPendingDisconnect) {
         Serial.println("[APP] Deferred disconnect");
 
@@ -904,6 +935,7 @@ void loop()
     }
 
     // Deferred reconnect after node-id change
+    tracePostReturn(5, "deferred-reconnect");
     if (ap04PendingReconnect && (int32_t)(millis() - ap04ReconnectDueMs) >= 0) {
         ap04PendingReconnect = false;
 
@@ -921,9 +953,11 @@ void loop()
     }
 
     // Master tick
+    tracePostReturn(6, "master-update");
     master.update();
 
     // Ping scan tick (fixed baud, no baud switching)
+    tracePostReturn(7, "ping-scan");
     if (pingScanRunning) {
         // Abort if user changed baud during scan
         if (activeBaud != pingScanBaudSnapshot) {
@@ -1346,13 +1380,20 @@ void loop()
     }
 
     // Deferred UI navigation (LVGL)
+    tracePostReturn(20, "deferred-ui");
     if (navPendingUiSwitch) {
         navPendingUiSwitch = false;
         Serial.println("[APP] Deferred UI switch -> start menu");
+        const bool destroyDunkerScreen = dunkerDestroyAfterHome;
+        dunkerDestroyAfterHome = false;
         if (lockLvglUi("deferred-ui-switch", 500)) {
             lvgl_port_reset_input();
             refreshStartMenuList();
             lv_scr_load(startUi.screen());
+            if (destroyDunkerScreen && dunkerUi.screen() && dunkerUi.screen() != startUi.screen()) {
+                dunkerUi.destroy();
+                Serial.println("[APP] Dunker UI destroyed after home switch");
+            }
             lvgl_port_reset_input();
             if (navOpenNodeDetail && selectedNodeId >= 1 && selectedNodeId <= 127) {
                 nodeDetailActive = true;
@@ -1362,6 +1403,7 @@ void loop()
             }
             lvgl_port_unlock();
             Serial.println("[APP] Deferred UI switch done");
+            tracePostReturn(21, "deferred-ui-done");
         } else {
             Serial.println("[APP] Deferred UI switch skipped: LVGL lock timeout");
         }
@@ -1369,6 +1411,7 @@ void loop()
     }
 
     // Prevent AP04 keep-alive while navigating
+    tracePostReturn(30, "ap04-keepalive");
     static uint32_t lastAp04StartKickMs = 0;
     if (!navPendingDisconnect && !navPendingUiSwitch && !ap04PendingReconnect) {
         if (master.mode() == MasterMode::OnlineKnown && selectedNodeId >= 1 && selectedNodeId <= 127) {
@@ -1387,6 +1430,7 @@ void loop()
     }
 
     // Auto-switch to AP04 page (create once)
+    tracePostReturn(31, "ap04-route");
     if (!ap04PageLoaded && selectedNodeId >= 1 && selectedNodeId <= 127) {
         const auto& dn = master.node(selectedNodeId);
         if (!dn.identifyInProgress && dn.known == KnownDeviceType::SIKO_AP04) {
@@ -1440,11 +1484,13 @@ void loop()
     }
 
     // Drive AP04 device update while page is active
+    tracePostReturn(32, "ap04-update");
     if (ap04UiIsActive && ap04Dev) {
         ap04Dev->update();
     }
 
     // Auto-switch to Dunker DS402 page (create once)
+    tracePostReturn(33, "dunker-route");
     if (!dunkerPageLoaded && selectedNodeId >= 1 && selectedNodeId <= 127) {
         const auto& dn = master.node(selectedNodeId);
         if (!dn.identifyInProgress && dn.known == KnownDeviceType::Dunker_75CI) {
@@ -1463,6 +1509,9 @@ void loop()
                 Serial.println("[UI] Dunker: back to main");
                 dunkerUiIsActive = false;   // stop RX processing BEFORE leaving
                 dunkerPageLoaded = false;
+                dunkerDestroyAfterHome = true;
+                postReturnTraceUntilMs = millis() + 15000;
+                postReturnLastStage = 0xFF;
                 nodeDetailActive = false;
                 navOpenNodeDetail = false;
                 // Clear the selection so the auto-route block does not immediately
@@ -1535,6 +1584,7 @@ void loop()
     }
 
     // UI update
+    tracePostReturn(40, "ui-update");
     if (now - lastUiUpdate >= Config::UI_UPDATE_MS) {
         lastUiUpdate = now;
 
@@ -1560,6 +1610,7 @@ void loop()
     }
 
     // Live monitor refresh (build a newest-first log from the sniffer buffer)
+    tracePostReturn(50, "monitor");
     if (monitorActive && (now - lastMonitorMs >= 150)) {
         lastMonitorMs = now;
 
@@ -1599,6 +1650,7 @@ void loop()
     }
 
     // Status print (+ sniffer health)
+    tracePostReturn(60, "status");
     if (now - lastStatusPrint >= Config::STATUS_PRINT_MS) {
         lastStatusPrint = now;
 
@@ -1629,5 +1681,6 @@ void loop()
 
     // Phase B UI integration will toggle snifferEnabled.
 
+    tracePostReturn(70, "loop-end");
     delay(10);
 }
