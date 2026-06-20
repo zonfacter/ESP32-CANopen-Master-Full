@@ -106,6 +106,7 @@ static DunkerUI    dunkerUi;
 static DunkerDrive* dunkerDev = nullptr;
 static bool        dunkerPageLoaded = false;
 static bool        dunkerUiIsActive = false;
+static volatile bool dunkerReturnHomePending = false;
 static bool        dunkerDestroyAfterHome = false;
 static uint32_t    postReturnTraceUntilMs = 0;
 static uint32_t    postReturnLastTraceMs = 0;
@@ -349,6 +350,8 @@ static bool initDisplay()
 // Helpers
 // ============================================================================
 
+static void refreshStartMenuList();
+
 static const char* hbStateToText(uint8_t st)
 {
     switch (st) {
@@ -394,6 +397,57 @@ static void tracePostReturn(uint8_t stage, const char* label)
                   dunkerUiIsActive ? 1 : 0,
                   navPendingDisconnect ? 1 : 0,
                   navPendingUiSwitch ? 1 : 0);
+}
+
+static void resetDunkerSessionToHome()
+{
+    Serial.println("[APP] Dunker return reset begin");
+
+    postReturnTraceUntilMs = millis() + 15000;
+    postReturnLastTraceMs = 0;
+    postReturnLastStage = 0xFF;
+
+    // Stop all app-side activity that can still reference the selected node or
+    // the Dunker page while we are returning to the passive start menu.
+    navPendingDisconnect = false;
+    navPendingUiSwitch = false;
+    navOpenNodeDetail = false;
+    ap04PendingReconnect = false;
+    nodeDetailActive = false;
+    ap04UiIsActive = false;
+    ap04PageLoaded = false;
+    ap04Dev = nullptr;
+    dunkerUiIsActive = false;
+    dunkerPageLoaded = false;
+    dunkerDestroyAfterHome = false;
+    selectedNodeId = 0;
+
+    pingScanRunning = false;
+    identifyAllRunning = false;
+    stdReadRunning = false;
+    ecoWriteRunning = false;
+    ecoLiveStatusNew = false;
+    ecoLivePollNextMs = 0;
+
+    identifySdo.cancel();
+    stdSdo.cancel();
+    if (dunkerDev) dunkerDev->deactivate();
+    master.disconnect();
+
+    if (lockLvglUi("dunker-return-reset", 500)) {
+        lvgl_port_reset_input();
+        refreshStartMenuList();
+        lv_scr_load(startUi.screen());
+        if (dunkerUi.screen() && dunkerUi.screen() != startUi.screen()) {
+            dunkerUi.destroy();
+            Serial.println("[APP] Dunker UI destroyed during return reset");
+        }
+        lvgl_port_reset_input();
+        lvgl_port_unlock();
+        Serial.println("[APP] Dunker return reset done");
+    } else {
+        Serial.println("[APP] Dunker return reset skipped: LVGL lock timeout");
+    }
 }
 
 static NodeDetail_Info makeNodeInfo(uint8_t nid)
@@ -896,6 +950,11 @@ void loop()
     tracePostReturn(3, "scan");
     scanActiveProbe(now);
     scanTick(now);
+
+    if (dunkerReturnHomePending) {
+        dunkerReturnHomePending = false;
+        resetDunkerSessionToHome();
+    }
 
     // Centralized CAN re-init handler (baud + loopback)
     if (canReinitPending && !canReinitInProgress) {
@@ -1507,18 +1566,10 @@ void loop()
             Dunker_Callbacks dcbs;
             dcbs.onBack = [](){
                 Serial.println("[UI] Dunker: back to main");
-                dunkerUiIsActive = false;   // stop RX processing BEFORE leaving
-                dunkerPageLoaded = false;
-                dunkerDestroyAfterHome = true;
+                dunkerUiIsActive = false;   // stop UI updates immediately
                 postReturnTraceUntilMs = millis() + 15000;
                 postReturnLastStage = 0xFF;
-                nodeDetailActive = false;
-                navOpenNodeDetail = false;
-                // Clear the selection so the auto-route block does not immediately
-                // recreate the Dunker page (and leak LVGL screens) on the same pass.
-                selectedNodeId = 0;
-                navPendingDisconnect = true;
-                navPendingUiSwitch = true;
+                dunkerReturnHomePending = true;
             };
             dcbs.onCommand = [](DunkerUiCmd c){
                 if (!dunkerDev) return;
