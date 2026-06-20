@@ -1338,13 +1338,15 @@ void loop()
         Serial.println("[APP] Deferred UI switch -> start menu");
         lvgl_port_lock(-1);
         refreshStartMenuList();
-        lv_scr_load_anim(startUi.screen(), LV_SCR_LOAD_ANIM_MOVE_RIGHT, 200, 0, false);
+        lv_indev_reset(nullptr, nullptr);
+        lv_scr_load(startUi.screen());
         if (navOpenNodeDetail && selectedNodeId >= 1 && selectedNodeId <= 127) {
             nodeDetailActive = true;
             refreshNodeDetail();
             nodeUi.setDeviceStatus("");
             nodeUi.load();
         }
+        navOpenNodeDetail = false;
         lvgl_port_unlock();
         Serial.println("[APP] Deferred UI switch done");
     }
@@ -1445,6 +1447,7 @@ void loop()
                 dunkerUiIsActive = false;   // stop RX processing BEFORE leaving
                 dunkerPageLoaded = false;
                 nodeDetailActive = false;
+                navOpenNodeDetail = false;
                 // Clear the selection so the auto-route block does not immediately
                 // recreate the Dunker page (and leak LVGL screens) on the same pass.
                 selectedNodeId = 0;
