@@ -356,6 +356,19 @@ static const char* hbStateToText(uint8_t st)
     }
 }
 
+static bool lockLvglUi(const char* context, int timeoutMs = 50)
+{
+    if (lvgl_port_lock(timeoutMs)) return true;
+
+    static uint32_t lastWarnMs = 0;
+    const uint32_t now = millis();
+    if (now - lastWarnMs >= 1000) {
+        lastWarnMs = now;
+        Serial.printf("[LVGL] WARN: lock timeout in %s\n", context ? context : "?");
+    }
+    return false;
+}
+
 static NodeDetail_Info makeNodeInfo(uint8_t nid)
 {
     NodeDetail_Info info;
@@ -1336,19 +1349,21 @@ void loop()
     if (navPendingUiSwitch) {
         navPendingUiSwitch = false;
         Serial.println("[APP] Deferred UI switch -> start menu");
-        lvgl_port_lock(-1);
-        refreshStartMenuList();
-        lv_indev_reset(nullptr, nullptr);
-        lv_scr_load(startUi.screen());
-        if (navOpenNodeDetail && selectedNodeId >= 1 && selectedNodeId <= 127) {
-            nodeDetailActive = true;
-            refreshNodeDetail();
-            nodeUi.setDeviceStatus("");
-            nodeUi.load();
+        if (lockLvglUi("deferred-ui-switch", 500)) {
+            refreshStartMenuList();
+            lv_scr_load(startUi.screen());
+            if (navOpenNodeDetail && selectedNodeId >= 1 && selectedNodeId <= 127) {
+                nodeDetailActive = true;
+                refreshNodeDetail();
+                nodeUi.setDeviceStatus("");
+                nodeUi.load();
+            }
+            lvgl_port_unlock();
+            Serial.println("[APP] Deferred UI switch done");
+        } else {
+            Serial.println("[APP] Deferred UI switch skipped: LVGL lock timeout");
         }
         navOpenNodeDetail = false;
-        lvgl_port_unlock();
-        Serial.println("[APP] Deferred UI switch done");
     }
 
     // Prevent AP04 keep-alive while navigating
@@ -1522,21 +1537,23 @@ void loop()
         lastUiUpdate = now;
 
         if (!navPendingDisconnect && !navPendingUiSwitch && !ap04PendingReconnect) {
-            lvgl_port_lock(-1);
-            refreshNodeDetail();
-            if (ap04UiIsActive) {
-                refreshAp04();
-                AP10UI_CanStats stats;
-                stats.busState = canDriver.stateText();
-                stats.rxCount = canDriver.rxCount();
-                stats.txCount = canDriver.txCount();
-                stats.errCount = canDriver.errCount();
-                stats.recoveryCount = canDriver.recoveryCount();
-                stats.pdoCount = ap04Dev ? ap04Dev->getData().updateCount : 0;
-                ap04Ui.updateCanStats(stats);
+            const bool needsUiRefresh = nodeDetailActive || ap04UiIsActive || (dunkerUiIsActive && dunkerDev);
+            if (needsUiRefresh && lockLvglUi("periodic-ui-update")) {
+                if (nodeDetailActive) refreshNodeDetail();
+                if (ap04UiIsActive) {
+                    refreshAp04();
+                    AP10UI_CanStats stats;
+                    stats.busState = canDriver.stateText();
+                    stats.rxCount = canDriver.rxCount();
+                    stats.txCount = canDriver.txCount();
+                    stats.errCount = canDriver.errCount();
+                    stats.recoveryCount = canDriver.recoveryCount();
+                    stats.pdoCount = ap04Dev ? ap04Dev->getData().updateCount : 0;
+                    ap04Ui.updateCanStats(stats);
+                }
+                if (dunkerUiIsActive && dunkerDev) dunkerUi.update(dunkerDev->getData());
+                lvgl_port_unlock();
             }
-            if (dunkerUiIsActive && dunkerDev) dunkerUi.update(dunkerDev->getData());
-            lvgl_port_unlock();
         }
     }
 
@@ -1568,14 +1585,15 @@ void loop()
         }
         if (pos == 0) snprintf(logbuf, sizeof(logbuf), "(keine Frames - Bus ruhig?)");
 
-        lvgl_port_lock(-1);
-        monitorUi.setLog(logbuf,
-                         totalFrames,
-                         sniffer.getDroppedCount(),
-                         sniffer.getLastTrafficAgeMs(),
-                         sniffer.getQueueDepth(),
-                         sniffer.getQueueHighWatermark());
-        lvgl_port_unlock();
+        if (lockLvglUi("monitor-refresh")) {
+            monitorUi.setLog(logbuf,
+                             totalFrames,
+                             sniffer.getDroppedCount(),
+                             sniffer.getLastTrafficAgeMs(),
+                             sniffer.getQueueDepth(),
+                             sniffer.getQueueHighWatermark());
+            lvgl_port_unlock();
+        }
     }
 
     // Status print (+ sniffer health)
