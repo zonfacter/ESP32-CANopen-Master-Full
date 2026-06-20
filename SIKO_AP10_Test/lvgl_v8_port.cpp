@@ -14,11 +14,18 @@ using namespace esp_panel::drivers;
 
 #define LVGL_PORT_ENABLE_ROTATION_OPTIMIZED     (1)
 #define LVGL_PORT_BUFFER_NUM_MAX                (2)
+#define LVGL_PORT_FLUSH_WAIT_MS                 (50)
 
 static SemaphoreHandle_t lvgl_mux = nullptr;
 static TaskHandle_t lvgl_task_handle = nullptr;
 static esp_timer_handle_t lvgl_tick_timer = NULL;
 static void *lvgl_buf[LVGL_PORT_BUFFER_NUM_MAX] = {};
+
+static inline void wait_lcd_refresh_done()
+{
+    ulTaskNotifyValueClear(NULL, ULONG_MAX);
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LVGL_PORT_FLUSH_WAIT_MS));
+}
 
 #if LVGL_PORT_ROTATION_DEGREE != 0
 static void *get_next_frame_buffer(LCD *lcd)
@@ -299,8 +306,7 @@ static void flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t
                 LV_HOR_RES, LV_VER_RES, LVGL_PORT_ROTATION_DEGREE
             );
             lcd->switchFrameBufferTo(next_fb);
-            ulTaskNotifyValueClear(NULL, ULONG_MAX);
-            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            wait_lcd_refresh_done();
             flush_dirty_copy(flush_get_next_buf(lcd), color_map, &dirty_area);
             flush_get_next_buf(lcd);
         } else {
@@ -317,8 +323,7 @@ static void flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t
                 flush_dirty_save(&dirty_area);
                 flush_dirty_copy(next_fb, color_map, &dirty_area);
                 lcd->switchFrameBufferTo(next_fb);
-                ulTaskNotifyValueClear(NULL, ULONG_MAX);
-                ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+                wait_lcd_refresh_done();
 
                 if (probe_result == FLUSH_PROBE_PART_COPY) {
                     flush_dirty_save(&dirty_area);
@@ -340,8 +345,7 @@ static void flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t
 
     if (lv_disp_flush_is_last(drv)) {
         lcd->switchFrameBufferTo(color_map);
-        ulTaskNotifyValueClear(NULL, ULONG_MAX);
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        wait_lcd_refresh_done();
     }
 
     lv_disp_flush_ready(drv);
@@ -354,8 +358,7 @@ static void flush_callback(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t
 {
     LCD *lcd = (LCD *)drv->user_data;
     lcd->switchFrameBufferTo(color_map);
-    ulTaskNotifyValueClear(NULL, ULONG_MAX);
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    wait_lcd_refresh_done();
     lv_disp_flush_ready(drv);
 }
 
