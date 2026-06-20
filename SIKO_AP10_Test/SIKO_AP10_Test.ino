@@ -1350,8 +1350,10 @@ void loop()
         navPendingUiSwitch = false;
         Serial.println("[APP] Deferred UI switch -> start menu");
         if (lockLvglUi("deferred-ui-switch", 500)) {
+            lvgl_port_reset_input();
             refreshStartMenuList();
             lv_scr_load(startUi.screen());
+            lvgl_port_reset_input();
             if (navOpenNodeDetail && selectedNodeId >= 1 && selectedNodeId <= 127) {
                 nodeDetailActive = true;
                 refreshNodeDetail();
@@ -1602,8 +1604,10 @@ void loop()
 
         const uint32_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
         const uint32_t largestHeap = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        lvgl_port_touch_stats_t touchStats;
+        lvgl_port_get_touch_stats(&touchStats);
 
-        Serial.printf("[STATUS] mode=%u baud=%lu bus=%s scan=%s sniffer=%s drops=%lu q=%u/%u age=%lu ms recoveries=%lu heap=%lu largest=%lu\n",
+        Serial.printf("[STATUS] mode=%u baud=%lu bus=%s scan=%s sniffer=%s drops=%lu q=%u/%u age=%lu ms recoveries=%lu heap=%lu largest=%lu touch=%lu/%lu last=%ld,%ld age=%lu\n",
                       (unsigned)master.mode(),
                       (unsigned long)activeBaud,
                       canDriver.stateText(),
@@ -1615,7 +1619,12 @@ void loop()
                       (unsigned long)sniffer.getLastTrafficAgeMs(),
                       (unsigned long)canDriver.recoveryCount(),
                       (unsigned long)freeHeap,
-                      (unsigned long)largestHeap);
+                      (unsigned long)largestHeap,
+                      (unsigned long)touchStats.readCount,
+                      (unsigned long)touchStats.pressCount,
+                      (long)touchStats.lastX,
+                      (long)touchStats.lastY,
+                      touchStats.lastPressMs ? (unsigned long)(millis() - touchStats.lastPressMs) : 0xFFFFFFFFUL);
     }
 
     // Phase B UI integration will toggle snifferEnabled.

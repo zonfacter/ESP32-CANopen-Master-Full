@@ -169,6 +169,17 @@ bool lvgl_port_lock(int timeout_ms);
  */
 bool lvgl_port_unlock(void);
 
+typedef struct {
+    uint32_t readCount;
+    uint32_t pressCount;
+    uint32_t lastPressMs;
+    int16_t lastX;
+    int16_t lastY;
+} lvgl_port_touch_stats_t;
+
+void lvgl_port_reset_input(void);
+void lvgl_port_get_touch_stats(lvgl_port_touch_stats_t *stats);
+
 #ifdef __cplusplus
 }
 #endif

@@ -20,6 +20,12 @@ static SemaphoreHandle_t lvgl_mux = nullptr;
 static TaskHandle_t lvgl_task_handle = nullptr;
 static esp_timer_handle_t lvgl_tick_timer = NULL;
 static void *lvgl_buf[LVGL_PORT_BUFFER_NUM_MAX] = {};
+static lv_indev_t *lvgl_touch_indev = nullptr;
+static volatile uint32_t touch_read_count = 0;
+static volatile uint32_t touch_press_count = 0;
+static volatile uint32_t touch_last_press_ms = 0;
+static volatile int16_t touch_last_x = -1;
+static volatile int16_t touch_last_y = -1;
 
 static inline void wait_lcd_refresh_done()
 {
@@ -563,11 +569,16 @@ static void touchpad_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data)
     Touch *tp = (Touch *)indev_drv->user_data;
     TouchPoint point;
 
+    touch_read_count++;
     int read_touch_result = tp->readPoints(&point, 1, 0);
     if (read_touch_result > 0) {
         data->point.x = point.x;
         data->point.y = point.y;
         data->state = LV_INDEV_STATE_PRESSED;
+        touch_press_count++;
+        touch_last_press_ms = millis();
+        touch_last_x = point.x;
+        touch_last_y = point.y;
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
     }
@@ -586,7 +597,8 @@ static lv_indev_t *indev_init(Touch *tp)
     indev_drv_tp.read_cb = touchpad_read;
     indev_drv_tp.user_data = (void *)tp;
 
-    return lv_indev_drv_register(&indev_drv_tp);
+    lvgl_touch_indev = lv_indev_drv_register(&indev_drv_tp);
+    return lvgl_touch_indev;
 }
 
 #if !LV_TICK_CUSTOM
@@ -733,6 +745,26 @@ bool lvgl_port_unlock(void)
     ESP_UTILS_CHECK_NULL_RETURN(lvgl_mux, false, "LVGL mutex is not initialized");
     xSemaphoreGiveRecursive(lvgl_mux);
     return true;
+}
+
+void lvgl_port_reset_input(void)
+{
+    if (lvgl_touch_indev != nullptr) {
+        lv_indev_reset(lvgl_touch_indev, nullptr);
+        lv_indev_wait_release(lvgl_touch_indev);
+    } else {
+        lv_indev_reset(nullptr, nullptr);
+    }
+}
+
+void lvgl_port_get_touch_stats(lvgl_port_touch_stats_t *stats)
+{
+    if (stats == nullptr) return;
+    stats->readCount = touch_read_count;
+    stats->pressCount = touch_press_count;
+    stats->lastPressMs = touch_last_press_ms;
+    stats->lastX = touch_last_x;
+    stats->lastY = touch_last_y;
 }
 
 bool lvgl_port_deinit(void)
