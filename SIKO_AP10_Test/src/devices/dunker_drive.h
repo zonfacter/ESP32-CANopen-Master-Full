@@ -33,6 +33,9 @@
 #include "../canopen/canopen_driver.h"
 #include "../canopen/sdo_client.h"
 
+static constexpr uint32_t DUNKER_SDO_TIMEOUT_MS = 400;
+static constexpr uint32_t DUNKER_IMA_SDO_TIMEOUT_MS = 3000;
+
 // ============================================================================
 // CiA 402 Objektverzeichnis (Teilmenge)
 // ============================================================================
@@ -83,6 +86,40 @@ enum class DS402State : uint8_t {
     Fault,
 };
 
+enum class ImaConfigState : uint8_t {
+    Idle = 0,
+    Running,
+    Verifying,
+    Done,
+    Error,
+    ParamResetting,
+    ParamResetDone,
+};
+
+struct ImaVerifyResult {
+    bool txPdo1_obj1 = false;
+    bool txPdo1_obj2 = false;
+    bool txPdo2_obj1 = false;
+    bool txPdo2_obj2 = false;
+    bool txPdo3_obj1 = false;
+    bool txPdo3_obj2 = false;
+    bool txPdo4_obj1 = false;
+    bool txPdo4_obj2 = false;
+    bool rxPdo1_obj1 = false;
+    bool rxPdo1_obj2 = false;
+    bool rxPdo2_obj1 = false;
+    bool rxPdo2_obj2 = false;
+
+    bool allOk() const {
+        return txPdo1_obj1 && txPdo1_obj2 &&
+               txPdo2_obj1 && txPdo2_obj2 &&
+               txPdo3_obj1 && txPdo3_obj2 &&
+               txPdo4_obj1 && txPdo4_obj2 &&
+               rxPdo1_obj1 && rxPdo1_obj2 &&
+               rxPdo2_obj1 && rxPdo2_obj2;
+    }
+};
+
 struct DunkerData {
     bool       connected        = false;
     // DS402 state machine
@@ -107,6 +144,10 @@ struct DunkerData {
     uint32_t   digitalInputs    = 0;     // 0x60FD
     uint32_t   digitalOutputs   = 0;     // last written 0x60FE:01
     bool       brakeConfigured  = false;
+    // IMA Config (M7)
+    ImaConfigState imaState     = ImaConfigState::Idle;
+    ImaVerifyResult imaVerify;
+    char       imaStatusMsg[80] = "---";
     // stats
     uint32_t   lastRxMs         = 0;
     uint32_t   updateCount      = 0;
@@ -120,7 +161,7 @@ public:
     DunkerDrive(CanopenDriver* can, uint8_t nodeId)
         : m_can(can), m_sdo(can, nodeId), m_nodeId(nodeId)
     {
-        m_sdo.setTimeout(400);
+        m_sdo.setTimeout(DUNKER_SDO_TIMEOUT_MS);
         m_hb = 0x700 + nodeId;
     }
 
@@ -130,13 +171,14 @@ public:
     void rebind(uint8_t nodeId) {
         m_nodeId = nodeId;
         m_sdo = SdoClient(m_can, nodeId);
-        m_sdo.setTimeout(400);
+        m_sdo.setTimeout(DUNKER_SDO_TIMEOUT_MS);
         m_hb = 0x700 + nodeId;
         m_qHead = m_qTail = 0;
         m_pollIdx = 0;
         m_nextPollMs = 0;
         m_data = DunkerData{};
         m_data.brakeConfigured = (m_brakeIndex != 0);
+        resetImaRuntime();
     }
 
     void deactivate() {
@@ -145,6 +187,10 @@ public:
         m_pollIdx = 0;
         m_nextPollMs = 0;
         m_data.connected = false;
+        resetImaRuntime();
+        m_data.imaState = ImaConfigState::Idle;
+        snprintf(m_data.imaStatusMsg, sizeof(m_data.imaStatusMsg), "---");
+        m_sdo.setTimeout(DUNKER_SDO_TIMEOUT_MS);
     }
 
     // -----------------------------------------------------------------------
@@ -224,6 +270,108 @@ public:
     }
 
     // -----------------------------------------------------------------------
+    // M7: IMA parameter configuration (PDO mapping + EEPROM)
+    // -----------------------------------------------------------------------
+    void imaConfigApply() {
+        if (imaBusy() || !qEmpty() || m_sdo.isBusy()) {
+            Serial.println("[DUNKER] IMA apply ignored: drive SDO busy");
+            return;
+        }
+
+        Serial.printf("[DUNKER] Node %u: IMA configuration apply\n", (unsigned)m_nodeId);
+        resetImaRuntime();
+        m_sdo.setTimeout(DUNKER_IMA_SDO_TIMEOUT_MS);
+        m_data.imaState = ImaConfigState::Running;
+        snprintf(m_data.imaStatusMsg, sizeof(m_data.imaStatusMsg), "IMA Uebertragung laeuft...");
+
+        qPushIma(0x1011, 0x01, 0x64616F6CUL, 4); // "load"
+
+        // Disable PDOs via communication parameters (COB-ID bit31), then clear
+        // mapping tables. Standard CANopen COB-IDs are used when re-enabling.
+        qPushIma(0x1800, 0x01, 0x80000180UL + m_nodeId, 4);
+        qPushIma(0x1801, 0x01, 0x80000280UL + m_nodeId, 4);
+        qPushIma(0x1802, 0x01, 0x80000380UL + m_nodeId, 4);
+        qPushIma(0x1803, 0x01, 0x80000480UL + m_nodeId, 4);
+        qPushIma(0x1400, 0x01, 0x80000200UL + m_nodeId, 4);
+        qPushIma(0x1401, 0x01, 0x80000300UL + m_nodeId, 4);
+
+        for (uint16_t idx = 0x1A00; idx <= 0x1A06; idx++) qPushIma(idx, 0x00, 0, 4);
+        for (uint16_t idx = 0x1600; idx <= 0x1606; idx++) qPushIma(idx, 0x00, 0, 4);
+
+        qPushIma(0x1A00, 0x01, 0x60410010UL, 4);
+        qPushIma(0x1A00, 0x02, 0x60640020UL, 4);
+        qPushIma(0x1A00, 0x00, 2, 4);
+
+        qPushIma(0x1A01, 0x01, 0x30020020UL, 4);
+        qPushIma(0x1A01, 0x02, 0x31200010UL, 4);
+        qPushIma(0x1A01, 0x00, 2, 4);
+
+        qPushIma(0x1A02, 0x01, 0x3A040020UL, 4);
+        qPushIma(0x1A02, 0x02, 0x37730020UL, 4);
+        qPushIma(0x1A02, 0x00, 2, 4);
+
+        qPushIma(0x1A03, 0x01, 0x31130020UL, 4);
+        qPushIma(0x1A03, 0x02, 0x39700108UL, 4);
+        qPushIma(0x1A03, 0x00, 2, 4);
+
+        qPushIma(0x1600, 0x01, 0x60400010UL, 4);
+        qPushIma(0x1600, 0x02, 0x607A0020UL, 4);
+        qPushIma(0x1600, 0x00, 2, 4);
+
+        qPushIma(0x1601, 0x01, 0x31500008UL, 4);
+        qPushIma(0x1601, 0x02, 0x60420010UL, 4);
+        qPushIma(0x1601, 0x00, 2, 4);
+
+        qPushIma(0x1800, 0x01, 0x00000180UL + m_nodeId, 4);
+        qPushIma(0x1801, 0x01, 0x00000280UL + m_nodeId, 4);
+        qPushIma(0x1802, 0x01, 0x00000380UL + m_nodeId, 4);
+        qPushIma(0x1803, 0x01, 0x00000480UL + m_nodeId, 4);
+        qPushIma(0x1400, 0x01, 0x00000200UL + m_nodeId, 4);
+        qPushIma(0x1401, 0x01, 0x00000300UL + m_nodeId, 4);
+
+        qPushIma(0x2000, 0x01, DUNKER_WREN, 4);
+        qPushIma(0x2000, 0x04, 0, 4);
+        qPushIma(0x1010, 0x01, 0x65766173UL, 4); // "save"
+
+        m_imaWriteCount = m_imaQueuedCount;
+        if (m_imaQueueOverflow || m_imaWriteCount == 0) {
+            m_qHead = m_qTail = 0;
+            m_sdo.setTimeout(DUNKER_SDO_TIMEOUT_MS);
+            m_data.imaState = ImaConfigState::Error;
+            snprintf(m_data.imaStatusMsg, sizeof(m_data.imaStatusMsg), "FEHLER: IMA Queue voll");
+        }
+    }
+
+    void imaVerify() {
+        if (imaBusy() || !qEmpty() || m_sdo.isBusy()) {
+            Serial.println("[DUNKER] IMA verify ignored: drive SDO busy");
+            return;
+        }
+        m_data.imaState = ImaConfigState::Verifying;
+        m_data.imaVerify = ImaVerifyResult{};
+        m_sdo.setTimeout(DUNKER_IMA_SDO_TIMEOUT_MS);
+        m_imaVerifyIdx = 0;
+        m_imaVerifyActive = true;
+        snprintf(m_data.imaStatusMsg, sizeof(m_data.imaStatusMsg), "Verifikation laeuft...");
+    }
+
+    void imaParamReset() {
+        if (imaBusy() || !qEmpty() || m_sdo.isBusy()) {
+            Serial.println("[DUNKER] IMA param reset ignored: drive SDO busy");
+            return;
+        }
+
+        Serial.printf("[DUNKER] Node %u: parameter reset only (0x1011:01)\n", (unsigned)m_nodeId);
+        resetImaRuntime();
+        m_sdo.setTimeout(DUNKER_IMA_SDO_TIMEOUT_MS);
+        m_data.imaState = ImaConfigState::ParamResetting;
+        m_imaParamResetOnly = true;
+        snprintf(m_data.imaStatusMsg, sizeof(m_data.imaStatusMsg), "Parameter-Reset laeuft...");
+        qPushIma(0x1011, 0x01, 0x64616F6CUL, 4); // "load"
+        m_imaWriteCount = m_imaQueuedCount;
+    }
+
+    // -----------------------------------------------------------------------
     // M6: digital I/O + brake
     // -----------------------------------------------------------------------
     // Set/clear one physical output bit (0x60FE:01). Read-modify-write on the
@@ -288,19 +436,58 @@ public:
 
         if (m_sdo.isBusy()) return;
 
-        // 1) Pending writes have priority (controlword, motion, I/O)
+        if (m_imaVerifyActive) {
+            runImaVerify();
+            return;
+        }
+
+        // Pending writes have priority (controlword, motion, I/O, IMA)
         if (!qEmpty()) {
             PendingWrite w = qPop();
             m_sdo.writeAsync(w.index, w.sub, w.value, w.size,
                 [this, w](SdoResult r, uint32_t){
                     if (r == SDO_OK) {
                         if (w.index == DS402_OBJ::CONTROLWORD) m_data.lastControlword = (uint16_t)w.value;
+                        if (w.isIma) {
+                            m_imaWriteDoneCount++;
+                            if (m_imaWriteDoneCount >= m_imaWriteCount) {
+                                if (m_imaParamResetOnly) {
+                                    m_imaParamResetOnly = false;
+                                    m_sdo.setTimeout(DUNKER_SDO_TIMEOUT_MS);
+                                    m_data.imaState = ImaConfigState::ParamResetDone;
+                                    snprintf(m_data.imaStatusMsg, sizeof(m_data.imaStatusMsg),
+                                             "Parameter-Reset OK. Power-Cycle erforderlich.");
+                                    Serial.println("[DUNKER] IMA parameter reset done; power-cycle required");
+                                } else {
+                                    m_data.imaState = ImaConfigState::Verifying;
+                                    m_data.imaVerify = ImaVerifyResult{};
+                                    m_imaVerifyIdx = 0;
+                                    m_imaVerifyActive = true;
+                                    snprintf(m_data.imaStatusMsg, sizeof(m_data.imaStatusMsg),
+                                             "IMA geschrieben, Verifikation laeuft...");
+                                    Serial.println("[DUNKER] IMA writes done, starting verify");
+                                }
+                            }
+                        }
                     } else if (w.index == 0x2000 && w.sub != 0x01 && r == SDO_TIMEOUT) {
                         // The drive applies node-id/baud and re-initialises WITHOUT
                         // sending an SDO confirmation -> a timeout here is expected.
                         // The value still takes effect after a power-cycle.
                         Serial.printf("[DUNKER] 0x2000:%u no SDO confirm (expected; value applies after power-cycle)\n",
                                       (unsigned)w.sub);
+                        if (w.isIma) {
+                            m_imaWriteDoneCount++;
+                        }
+                    } else if (w.isIma) {
+                        m_qHead = m_qTail = 0;
+                        m_imaVerifyActive = false;
+                        m_imaParamResetOnly = false;
+                        m_sdo.setTimeout(DUNKER_SDO_TIMEOUT_MS);
+                        m_data.imaState = ImaConfigState::Error;
+                        snprintf(m_data.imaStatusMsg, sizeof(m_data.imaStatusMsg),
+                                 "FEHLER: SDO 0x%04X:%u (%d)", w.index, (unsigned)w.sub, (int)r);
+                        Serial.printf("[DUNKER] IMA write 0x%04X:%u failed (%d)\n",
+                                      w.index, (unsigned)w.sub, (int)r);
                     } else {
                         Serial.printf("[DUNKER] write 0x%04X:%u failed (%d)\n", w.index, (unsigned)w.sub, (int)r);
                     }
@@ -310,7 +497,9 @@ public:
             return;
         }
 
-        // 2) Round-robin read poll
+        if (imaBusy()) return;
+
+        // Round-robin read poll
         if ((int32_t)(now - m_nextPollMs) >= 0) {
             m_nextPollMs = now + m_pollPeriodMs;
             pollNext();
@@ -344,26 +533,114 @@ public:
         }
     }
 
+    static const char* imaStateName(ImaConfigState s) {
+        switch (s) {
+            case ImaConfigState::Idle:           return "Bereit";
+            case ImaConfigState::Running:        return "IMA Uebertragung...";
+            case ImaConfigState::Verifying:      return "Verifikation...";
+            case ImaConfigState::Done:           return "Abgeschlossen OK";
+            case ImaConfigState::Error:          return "FEHLER";
+            case ImaConfigState::ParamResetting: return "Parameter-Reset laeuft...";
+            case ImaConfigState::ParamResetDone: return "Parameter-Reset OK (Power-Cycle!)";
+            default:                             return "---";
+        }
+    }
+
 private:
-    struct PendingWrite { uint16_t index; uint8_t sub; uint32_t value; uint8_t size; };
-    static constexpr uint8_t QN = 12;
+    struct ImaVerifyStep {
+        uint16_t index;
+        uint8_t sub;
+        uint32_t expected;
+        bool ImaVerifyResult::* resultField;
+        const char* label;
+    };
+    static const ImaVerifyStep s_imaVerifySteps[12];
+
+    struct PendingWrite { uint16_t index; uint8_t sub; uint32_t value; uint8_t size; bool isIma = false; };
+    static constexpr uint8_t QN = 64;
 
     void writeCw(uint16_t cw) { qPush(DS402_OBJ::CONTROLWORD, 0x00, cw, 2); }
 
     bool qEmpty() const { return m_qHead == m_qTail; }
-    void qPush(uint16_t index, uint8_t sub, uint32_t value, uint8_t size) {
+
+    bool qPush(uint16_t index, uint8_t sub, uint32_t value, uint8_t size, bool isIma = false) {
         const uint8_t next = (uint8_t)((m_qTail + 1) % QN);
         if (next == m_qHead) {
             Serial.println("[DUNKER] write queue full - command dropped");
-            return;
+            if (isIma) m_imaQueueOverflow = true;
+            return false;
         }
-        m_q[m_qTail] = PendingWrite{ index, sub, value, size };
+        m_q[m_qTail] = PendingWrite{ index, sub, value, size, isIma };
         m_qTail = next;
+        return true;
     }
+
+    void qPushIma(uint16_t index, uint8_t sub, uint32_t value, uint8_t size) {
+        if (qPush(index, sub, value, size, true)) m_imaQueuedCount++;
+    }
+
     PendingWrite qPop() {
         PendingWrite w = m_q[m_qHead];
         m_qHead = (uint8_t)((m_qHead + 1) % QN);
         return w;
+    }
+
+    bool imaBusy() const {
+        return m_data.imaState == ImaConfigState::Running ||
+               m_data.imaState == ImaConfigState::Verifying ||
+               m_data.imaState == ImaConfigState::ParamResetting ||
+               m_imaVerifyActive;
+    }
+
+    void resetImaRuntime() {
+        m_imaVerifyActive = false;
+        m_imaVerifyIdx = 0;
+        m_imaQueuedCount = 0;
+        m_imaWriteCount = 0;
+        m_imaWriteDoneCount = 0;
+        m_imaParamResetOnly = false;
+        m_imaQueueOverflow = false;
+    }
+
+    void runImaVerify() {
+        if (m_imaVerifyIdx >= 12) {
+            m_imaVerifyActive = false;
+            m_sdo.setTimeout(DUNKER_SDO_TIMEOUT_MS);
+            if (m_data.imaVerify.allOk()) {
+                m_data.imaState = ImaConfigState::Done;
+                snprintf(m_data.imaStatusMsg, sizeof(m_data.imaStatusMsg),
+                         "OK - alle 12 Mapping-Objekte korrekt.");
+                Serial.println("[DUNKER] IMA verify: all OK");
+            } else {
+                uint8_t ok = 0;
+                const ImaVerifyResult& v = m_data.imaVerify;
+                auto countOk = [&](bool b){ if (b) ok++; };
+                countOk(v.txPdo1_obj1); countOk(v.txPdo1_obj2);
+                countOk(v.txPdo2_obj1); countOk(v.txPdo2_obj2);
+                countOk(v.txPdo3_obj1); countOk(v.txPdo3_obj2);
+                countOk(v.txPdo4_obj1); countOk(v.txPdo4_obj2);
+                countOk(v.rxPdo1_obj1); countOk(v.rxPdo1_obj2);
+                countOk(v.rxPdo2_obj1); countOk(v.rxPdo2_obj2);
+                m_data.imaState = ImaConfigState::Error;
+                snprintf(m_data.imaStatusMsg, sizeof(m_data.imaStatusMsg),
+                         "FEHLER: %u/12 Mapping-Checks OK", (unsigned)ok);
+                Serial.printf("[DUNKER] IMA verify: %u/12 OK\n", (unsigned)ok);
+            }
+            return;
+        }
+
+        const ImaVerifyStep& step = s_imaVerifySteps[m_imaVerifyIdx];
+        const uint8_t verifyIdx = m_imaVerifyIdx;
+        m_sdo.readAsync(step.index, step.sub, [this, verifyIdx](SdoResult r, uint32_t v) {
+            const ImaVerifyStep& st = s_imaVerifySteps[verifyIdx];
+            const bool ok = (r == SDO_OK && v == st.expected);
+            m_data.imaVerify.*(st.resultField) = ok;
+            Serial.printf("[DUNKER] IMA verify %s: 0x%04X:%u = 0x%08lX expected 0x%08lX -> %s\n",
+                          st.label, st.index, (unsigned)st.sub,
+                          (unsigned long)v, (unsigned long)st.expected,
+                          ok ? "OK" : "FAIL");
+            m_imaVerifyIdx++;
+        });
     }
 
     void pollNext() {
@@ -442,7 +719,30 @@ private:
     uint32_t m_brakeEngage  = 0;
     uint8_t  m_brakeSize    = 2;
 
+    bool     m_imaVerifyActive   = false;
+    uint8_t  m_imaVerifyIdx      = 0;
+    uint8_t  m_imaQueuedCount    = 0;
+    uint8_t  m_imaWriteCount     = 0;
+    uint8_t  m_imaWriteDoneCount = 0;
+    bool     m_imaParamResetOnly = false;
+    bool     m_imaQueueOverflow  = false;
+
     DunkerData m_data;
+};
+
+inline const DunkerDrive::ImaVerifyStep DunkerDrive::s_imaVerifySteps[12] = {
+    { 0x1A00, 0x01, 0x60410010UL, &ImaVerifyResult::txPdo1_obj1, "TxPDO1 Obj1 Statusword" },
+    { 0x1A00, 0x02, 0x60640020UL, &ImaVerifyResult::txPdo1_obj2, "TxPDO1 Obj2 Actual Position" },
+    { 0x1A01, 0x01, 0x30020020UL, &ImaVerifyResult::txPdo2_obj1, "TxPDO2 Obj1 Statusreg" },
+    { 0x1A01, 0x02, 0x31200010UL, &ImaVerifyResult::txPdo2_obj2, "TxPDO2 Obj2 Inputs" },
+    { 0x1A02, 0x01, 0x3A040020UL, &ImaVerifyResult::txPdo3_obj1, "TxPDO3 Obj1 Velocity" },
+    { 0x1A02, 0x02, 0x37730020UL, &ImaVerifyResult::txPdo3_obj2, "TxPDO3 Obj2 Following Error" },
+    { 0x1A03, 0x01, 0x31130020UL, &ImaVerifyResult::txPdo4_obj1, "TxPDO4 Obj1 Motor Current" },
+    { 0x1A03, 0x02, 0x39700108UL, &ImaVerifyResult::txPdo4_obj2, "TxPDO4 Obj2 SSI Status" },
+    { 0x1600, 0x01, 0x60400010UL, &ImaVerifyResult::rxPdo1_obj1, "RxPDO1 Obj1 Controlword" },
+    { 0x1600, 0x02, 0x607A0020UL, &ImaVerifyResult::rxPdo1_obj2, "RxPDO1 Obj2 Target Position" },
+    { 0x1601, 0x01, 0x31500008UL, &ImaVerifyResult::rxPdo2_obj1, "RxPDO2 Obj1 Outputs" },
+    { 0x1601, 0x02, 0x60420010UL, &ImaVerifyResult::rxPdo2_obj2, "RxPDO2 Obj2 VL Velocity" },
 };
 
 #endif // DUNKER_DRIVE_H

@@ -1589,6 +1589,14 @@ void loop()
             // M6: I/O + brake
             dcbs.onSetOutput = [](uint8_t bit, bool on){ if (dunkerDev) dunkerDev->setOutputBit(bit, on); };
             dcbs.onBrake     = [](bool release){ if (dunkerDev) dunkerDev->setBrake(release); };
+            dcbs.onImaAction = [](ImaUiAction action){
+                if (!dunkerDev) return;
+                switch (action) {
+                    case ImaUiAction::Apply:      dunkerDev->imaConfigApply(); break;
+                    case ImaUiAction::Verify:     dunkerDev->imaVerify(); break;
+                    case ImaUiAction::ParamReset: dunkerDev->imaParamReset(); break;
+                }
+            };
             // Cfg: Dunker node-id/baud via manufacturer SDO 0x2000 (LSS is not
             // supported by this drive -- confirmed on hardware).
             //   0x2000:01 unlock, :02 node-id, :03 baud index (verified on hardware)

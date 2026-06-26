@@ -8,6 +8,7 @@
  *                    GO (New-Setpoint), Halt, Jog +/- (Profile Velocity)
  *   - "I/O"    (M6): Digitale Eingaenge (60FD), Ausgaenge (60FE:01),
  *                    Bremse (herstellerspezifisch - Objekt aus EDS)
+ *   - "IMA Cfg" (M7): IMA PDO-Mapping, Verifikation, Parameter-Reset
  *
  * SPEICHERN ALS: src/ui/dunker_ui.h
  */
@@ -29,6 +30,12 @@ enum class DunkerUiCmd : uint8_t {
     Halt,
 };
 
+enum class ImaUiAction : uint8_t {
+    Apply,
+    Verify,
+    ParamReset,
+};
+
 struct Dunker_Callbacks {
     std::function<void()>                  onBack      = nullptr;
     std::function<void(DunkerUiCmd)>       onCommand   = nullptr; // M4 controlword
@@ -38,6 +45,7 @@ struct Dunker_Callbacks {
     std::function<void(uint8_t, bool)>     onSetOutput = nullptr; // M6 (bit, on)
     std::function<void(bool)>              onBrake     = nullptr; // M6 (release)
     std::function<void(uint8_t, uint32_t)> onLssApply  = nullptr; // Cfg (new node-id, baud; baud 0 = keep)
+    std::function<void(ImaUiAction)>       onImaAction = nullptr; // M7 IMA
 };
 
 class DunkerUI {
@@ -91,6 +99,7 @@ public:
         lv_obj_t* tabMot  = lv_tabview_add_tab(tv, "Motion");
         lv_obj_t* tabIo   = lv_tabview_add_tab(tv, "I/O");
         lv_obj_t* tabCfg  = lv_tabview_add_tab(tv, "Cfg");
+        lv_obj_t* tabIma  = lv_tabview_add_tab(tv, "IMA Cfg");
 
         m_cfgNodeId = nodeId;   // default target = current node
 
@@ -98,6 +107,7 @@ public:
         buildMotionTab(tabMot);
         buildIoTab(tabIo);
         buildCfgTab(tabCfg);
+        buildImaCfgTab(tabIma);
 
         s_inst = this;
     }
@@ -141,6 +151,9 @@ public:
         m_btnCfgB250 = nullptr;
         m_btnCfgB500 = nullptr;
         m_lblLssStatus = nullptr;
+        m_lblImaState = nullptr;
+        m_lblImaMsg = nullptr;
+        m_lblImaVerify = nullptr;
         if (s_inst == this) s_inst = nullptr;
     }
 
@@ -213,6 +226,33 @@ public:
             snprintf(b, sizeof(b), "Bremse: %s",
                      d.brakeConfigured ? "Objekt konfiguriert" : "nicht konfiguriert (EDS noetig)");
             lv_label_set_text(m_lblBrake, b);
+        }
+
+        if (m_lblImaState) {
+            snprintf(b, sizeof(b), "Status: %s", DunkerDrive::imaStateName(d.imaState));
+            lv_label_set_text(m_lblImaState, b);
+            uint32_t col = 0xAAAAAA;
+            if (d.imaState == ImaConfigState::Done) col = 0x33DD66;
+            else if (d.imaState == ImaConfigState::ParamResetDone) col = 0x33AADD;
+            else if (d.imaState == ImaConfigState::Error) col = 0xFF4444;
+            else if (d.imaState == ImaConfigState::Running ||
+                     d.imaState == ImaConfigState::Verifying ||
+                     d.imaState == ImaConfigState::ParamResetting) col = 0xFFBB33;
+            lv_obj_set_style_text_color(m_lblImaState, lv_color_hex(col), 0);
+        }
+        if (m_lblImaMsg) {
+            lv_label_set_text(m_lblImaMsg, d.imaStatusMsg);
+        }
+        if (m_lblImaVerify) {
+            const ImaVerifyResult& v = d.imaVerify;
+            snprintf(b, sizeof(b), "T1:%c%c T2:%c%c T3:%c%c T4:%c%c  R1:%c%c R2:%c%c",
+                     v.txPdo1_obj1 ? 'O' : '-', v.txPdo1_obj2 ? 'O' : '-',
+                     v.txPdo2_obj1 ? 'O' : '-', v.txPdo2_obj2 ? 'O' : '-',
+                     v.txPdo3_obj1 ? 'O' : '-', v.txPdo3_obj2 ? 'O' : '-',
+                     v.txPdo4_obj1 ? 'O' : '-', v.txPdo4_obj2 ? 'O' : '-',
+                     v.rxPdo1_obj1 ? 'O' : '-', v.rxPdo1_obj2 ? 'O' : '-',
+                     v.rxPdo2_obj1 ? 'O' : '-', v.rxPdo2_obj2 ? 'O' : '-');
+            lv_label_set_text(m_lblImaVerify, b);
         }
     }
 
@@ -313,6 +353,32 @@ private:
         mkBtn(t, "BRAKE RELEASE", 0x007744, 8,   176, 200, 60, DunkerUI::onBrakeReleaseClicked);
         mkBtn(t, "BRAKE ENGAGE",  0x884444, 218, 176, 200, 60, DunkerUI::onBrakeEngageClicked);
         m_lblBrake = mkLabel(t, "Bremse: ---", 8, 246, 0x8888AA, &lv_font_montserrat_14);
+    }
+
+    void buildImaCfgTab(lv_obj_t* t) {
+        mkLabel(t, "IMA Parameter Konfiguration", 8, 8, 0xFFFFFF, &lv_font_montserrat_18);
+        mkLabel(t,
+            "APPLY schreibt PDO Mapping + AutoOp + EEPROM. PARAM RESET setzt nur 0x1011:01.",
+            8, 38, 0xCCCCCC, &lv_font_montserrat_14);
+
+        mkLabel(t, "TxPDO1: 6041 + 6064     TxPDO2: 3002 + 3120", 8, 72, 0x8888AA, &lv_font_montserrat_14);
+        mkLabel(t, "TxPDO3: 3A04 + 3773     TxPDO4: 3113 + 3970:01", 8, 94, 0x8888AA, &lv_font_montserrat_14);
+        mkLabel(t, "RxPDO1: 6040 + 607A     RxPDO2: 3150 + 6042", 8, 116, 0x8888AA, &lv_font_montserrat_14);
+
+        mkBtn(t, "APPLY\nReset+Map+EEPROM", 0xB23A48, 8, 154, 220, 72, DunkerUI::onImaApplyClicked);
+        mkBtn(t, "VERIFY\nSDO Check", 0x0F3460, 240, 154, 170, 72, DunkerUI::onImaVerifyClicked);
+        mkBtn(t, "PARAM RESET\nonly 0x1011:01", 0x7A3A00, 422, 154, 220, 72, DunkerUI::onImaParamResetClicked);
+
+        mkLabel(t,
+            LV_SYMBOL_WARNING " Bus-/geraetewirksam: PDO-Mapping und EEPROM-Write.\n"
+            "PARAM RESET stellt Dunker-Standardparameter wieder her; danach Power-Cycle.",
+            8, 246, 0xFFBB33, &lv_font_montserrat_14);
+
+        m_lblImaState = mkLabel(t, "Status: Bereit", 8, 314, 0xAAAAAA, &lv_font_montserrat_18);
+        m_lblImaMsg = mkLabel(t, "---", 8, 344, 0x8888AA, &lv_font_montserrat_14);
+        mkLabel(t, "Verify: O=OK, -=nicht OK/noch nicht gelesen", 8, 372, 0xCCCCCC, &lv_font_montserrat_14);
+        m_lblImaVerify = mkLabel(t, "T1:-- T2:-- T3:-- T4:--  R1:-- R2:--",
+                                 8, 396, 0x8888AA, &lv_font_montserrat_14);
     }
 
     void buildCfgTab(lv_obj_t* t) {
@@ -455,6 +521,16 @@ private:
         if (s_inst && s_inst->m_cbs.onLssApply) s_inst->m_cbs.onLssApply(s_inst->m_cfgNodeId, s_inst->m_cfgBaud);
     }
 
+    static void onImaApplyClicked(lv_event_t*) {
+        if (s_inst && s_inst->m_cbs.onImaAction) s_inst->m_cbs.onImaAction(ImaUiAction::Apply);
+    }
+    static void onImaVerifyClicked(lv_event_t*) {
+        if (s_inst && s_inst->m_cbs.onImaAction) s_inst->m_cbs.onImaAction(ImaUiAction::Verify);
+    }
+    static void onImaParamResetClicked(lv_event_t*) {
+        if (s_inst && s_inst->m_cbs.onImaAction) s_inst->m_cbs.onImaAction(ImaUiAction::ParamReset);
+    }
+
     // Keyboard show/hide with iPhone-style content scrolling.
     static void onTaFocused(lv_event_t* ev) {
         if (!s_inst || !s_inst->m_kb) return;
@@ -516,6 +592,9 @@ private:
     lv_obj_t* m_btnCfgB250 = nullptr;
     lv_obj_t* m_btnCfgB500 = nullptr;
     lv_obj_t* m_lblLssStatus = nullptr;
+    lv_obj_t* m_lblImaState = nullptr;
+    lv_obj_t* m_lblImaMsg = nullptr;
+    lv_obj_t* m_lblImaVerify = nullptr;
 
     inline static DunkerUI* s_inst = nullptr;
 };
