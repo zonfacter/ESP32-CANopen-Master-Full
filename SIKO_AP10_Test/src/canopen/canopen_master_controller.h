@@ -324,6 +324,14 @@ public:
         }
 
         if (m_initStage == OnlineInitStage::Identify_650A_Subs) {
+            if (!(nd.vendorId == 0x00000195UL && nd.productCode == 0x004E4143UL)) {
+                Serial.printf("[MASTER] Identify: skip AP04 650Ah reads for vendor=0x%08lX product=0x%08lX\n",
+                              (unsigned long)nd.vendorId,
+                              (unsigned long)nd.productCode);
+                scheduleNext(OnlineInitStage::Done, 0);
+                return;
+            }
+
             Serial.printf("[MASTER] Identify: read 650Ah:00 (Sub count) node %u\n", (unsigned)m_onlineNodeId);
             m_sdo->readAsync(0x650A, 0x00, [this](SdoResult r, uint32_t v){
                 auto& n = m_nodes[m_onlineNodeId];
